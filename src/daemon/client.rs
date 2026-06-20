@@ -94,6 +94,52 @@ impl DaemonClient {
 
     // --- typed API calls (used by the Phase-4 CLI) ---------------------------
 
+    /// `POST /runs` — start an owned (Mode-A) run; returns the created `Run`
+    /// (with its id + pid). `None` fields are omitted from the body so the daemon
+    /// applies its own defaults (agent, label, cwd). A `400` (e.g. unknown agent)
+    /// surfaces as the daemon's message rather than a generic HTTP error.
+    pub fn create_run(
+        &self,
+        prompt: &str,
+        agent: Option<&str>,
+        cwd: Option<&str>,
+        label: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Run> {
+        let mut body = serde_json::Map::new();
+        body.insert("prompt".into(), prompt.into());
+        if let Some(a) = agent {
+            body.insert("agent".into(), a.into());
+        }
+        if let Some(c) = cwd {
+            body.insert("cwd".into(), c.into());
+        }
+        if let Some(l) = label {
+            body.insert("label".into(), l.into());
+        }
+        if let Some(m) = model {
+            body.insert("model".into(), m.into());
+        }
+
+        let resp = self
+            .http
+            .post(format!("{}/runs", self.base))
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .context("POST /runs")?;
+        if !resp.status().is_success() {
+            // Prefer the daemon's `{ "error": … }` message over a bare status.
+            let status = resp.status();
+            let msg = resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_else(|| status.to_string());
+            bail!("{msg}");
+        }
+        resp.json().context("decoding created run")
+    }
+
     /// `GET /runs`.
     pub fn list_runs(&self) -> Result<Vec<Run>> {
         self.get_json("/runs")

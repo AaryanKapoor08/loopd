@@ -28,7 +28,7 @@
 
 pub mod claude;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::core::events::LoopEvent;
 
@@ -104,6 +104,26 @@ pub trait Adapter: Send + Sync {
         Vec::new()
     }
 
+    /// Probe whether this agent's executable is installed. The default resolves
+    /// [`Adapter::program`] on `PATH` (honoring Windows `PATHEXT`, so `claude`
+    /// matches `claude.cmd`); adapters may override to add a version string.
+    /// Feeds the `loop run` preflight and `loop init` diagnostics (Phase 4).
+    fn availability(&self) -> Availability {
+        Availability {
+            program: self.program().to_string(),
+            path: find_on_path(self.program()),
+        }
+    }
+
+    /// Resolve the agent binary on `PATH` or fail with [`ExecutorError::ExecutableNotFound`].
+    /// `loop run` calls this before asking the daemon to spawn, so a missing
+    /// binary surfaces as a clear message instead of a buried spawn error.
+    fn preflight(&self) -> std::result::Result<PathBuf, ExecutorError> {
+        self.availability().path.ok_or_else(|| ExecutorError::ExecutableNotFound {
+            program: self.program().to_string(),
+        })
+    }
+
     /// Mode-B (Phase 7): does this transcript file belong to this agent?
     fn match_transcript(&self, _path: &Path) -> bool {
         false
@@ -113,6 +133,86 @@ pub trait Adapter: Send + Sync {
     fn match_hook(&self, _payload: &serde_json::Value) -> Option<String> {
         None
     }
+}
+
+/// Whether an agent's executable is installed, and where. Returned by
+/// [`Adapter::availability`].
+#[derive(Debug, Clone)]
+pub struct Availability {
+    /// The program name we looked for (`claude`, `codex`).
+    pub program: String,
+    /// Where it resolved on `PATH`, or `None` if not found.
+    pub path: Option<PathBuf>,
+}
+
+impl Availability {
+    /// Is the binary installed?
+    pub fn available(&self) -> bool {
+        self.path.is_some()
+    }
+}
+
+/// A small, explicit error taxonomy for invoking agents — modeled on
+/// vibe-kanban's `ExecutorError`. v1 carries the two cases the CLI preflight and
+/// `loop init` need; Phase 8 (Codex) reuses `AuthRequired` for `401`s.
+#[derive(Debug)]
+pub enum ExecutorError {
+    /// The agent's binary was not found on `PATH`.
+    ExecutableNotFound { program: String },
+    /// The agent needs an interactive login first (e.g. `claude` / `codex auth`).
+    AuthRequired { agent: String },
+}
+
+impl std::fmt::Display for ExecutorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutorError::ExecutableNotFound { program } => write!(
+                f,
+                "agent executable `{program}` was not found on your PATH — install it (or check PATH) and try again"
+            ),
+            ExecutorError::AuthRequired { agent } => {
+                write!(f, "agent `{agent}` needs you to log in first")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExecutorError {}
+
+/// Resolve `program` to a concrete file on `PATH`. On Windows this also tries the
+/// `PATHEXT` extensions (so `claude` matches the `claude.cmd` npm shim, which is
+/// how Claude Code installs — there is no native `claude.exe`). Returns the first
+/// match, or `None`. A read-only filesystem probe — loopd never executes here.
+pub fn find_on_path(program: &str) -> Option<PathBuf> {
+    // An explicit path (absolute or containing a separator) is used as-is.
+    let p = Path::new(program);
+    if p.components().count() > 1 || p.is_absolute() {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    for dir in std::env::split_paths(&path_var) {
+        let direct = dir.join(program);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        #[cfg(windows)]
+        for ext in &exts {
+            let candidate = dir.join(format!("{program}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// The stateful half of an adapter: one per run. Fed raw output **chunks** (not
@@ -140,5 +240,51 @@ pub fn adapter_for(id: &str) -> Option<Box<dyn Adapter>> {
     match id {
         "claude" => Some(Box::new(claude::ClaudeAdapter::new())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_on_path_resolves_a_known_system_binary() {
+        // Every platform ships the shell loopd already shells out to.
+        let program = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(
+            find_on_path(program).is_some(),
+            "`{program}` must resolve on PATH"
+        );
+    }
+
+    #[test]
+    fn missing_binary_does_not_resolve() {
+        assert!(find_on_path("loopd-definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn preflight_errors_clearly_for_a_missing_agent() {
+        struct GhostAdapter;
+        impl Adapter for GhostAdapter {
+            fn id(&self) -> &str {
+                "ghost"
+            }
+            fn program(&self) -> &str {
+                "loopd-definitely-not-a-real-binary-xyz"
+            }
+            fn build_args(&self, _t: &str, _o: &RunOpts) -> Vec<String> {
+                Vec::new()
+            }
+            fn resume_args(&self, _s: &str, _t: &str, _o: &RunOpts) -> Vec<String> {
+                Vec::new()
+            }
+            fn new_parser(&self, run_id: &str) -> Box<dyn StreamParser> {
+                claude::ClaudeAdapter::new().new_parser(run_id)
+            }
+        }
+        let err = GhostAdapter.preflight().expect_err("missing binary must error");
+        assert!(matches!(err, ExecutorError::ExecutableNotFound { .. }));
+        // The message names the program and is actionable (no stack trace).
+        assert!(err.to_string().contains("not found on your PATH"));
     }
 }
