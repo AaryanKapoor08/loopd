@@ -360,6 +360,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Gate check: the store actually writes and reads `~/.loopd/loopd.db`.
+    /// Uses unique ids and deletes its own rows afterward so it doesn't pollute
+    /// the developer's real database.
+    #[test]
+    fn writes_default_db() {
+        let store = Store::open_default().expect("open default store");
+        let db = config::loopd_dir().join("loopd.db");
+        assert!(db.exists(), "loopd.db should exist at {}", db.display());
+
+        let run_id = new_run_id();
+        let mut run = Run::new(&run_id);
+        run.agent = "claude".to_string();
+        store.upsert_run(&run).expect("upsert run");
+        for i in 0..3u32 {
+            let mut ev = LoopEvent::new(&run_id, Source::Supervisor, EventKind::Assistant);
+            ev.iteration = Some(i);
+            store.insert_event(&ev).expect("insert event");
+        }
+
+        let got = store.get_run(&run_id).expect("get").expect("exists");
+        assert_eq!(got.agent, "claude");
+        assert_eq!(store.events_for_run(&run_id, 100).unwrap().len(), 3);
+
+        // Clean up this test's rows from the shared real db.
+        store
+            .conn
+            .execute("DELETE FROM events WHERE run_id = ?1", params![run_id])
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE run_id = ?1", params![run_id])
+            .unwrap();
+    }
+
     /// upsert_run must update an existing row, not duplicate it.
     #[test]
     fn upsert_updates_in_place() {
