@@ -15,3 +15,4 @@
 //! - `git`      — read-only `git diff` hashing for the no-progress signal (Phase 6).
 
 pub mod events;
+pub mod pricing;
