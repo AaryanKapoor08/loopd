@@ -51,10 +51,11 @@ pub fn init() -> Result<()> {
         config.daemon.port
     );
 
-    // 4. Mode-B hooks — Phase 7 (forward dep). Tell the user, don't block.
+    // 4. Mode-B hooks — available now (Phase 7). Don't auto-edit the user's CC
+    //    settings; point them at the explicit opt-in command.
     println!(
-        "\nMode-B observation (see sessions you start yourself) installs in Phase 7:\n  \
-         loop hooks install   # not yet available"
+        "\nMode-B observation (see `claude` sessions you start yourself) is opt-in:\n  \
+         loop hooks install   # merges loopd's hooks into ~/.claude/settings.json"
     );
     println!("\nready — start a run with `loop run \"<task>\"`, then `loop ps` / `loop dash`.");
     Ok(())

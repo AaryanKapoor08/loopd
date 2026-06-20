@@ -15,6 +15,7 @@ pub mod daemon;
 pub mod dash;
 pub mod fmt;
 pub mod hooks;
+pub mod ingest;
 pub mod init;
 pub mod kill;
 pub mod logs;

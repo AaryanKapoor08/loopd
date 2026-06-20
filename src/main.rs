@@ -79,6 +79,9 @@ enum Command {
         #[command(subcommand)]
         action: cli::hooks::HooksAction,
     },
+    /// Forward a Claude Code hook payload (stdin) to the daemon. Run by the
+    /// installed hooks, not usually by hand. (Phase 7)
+    Ingest,
 }
 
 /// `loop daemon <action>`.
@@ -117,6 +120,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Logs(args)) => cli::logs::logs(args)?,
         Some(Command::Dash) => cli::dash::dash()?,
         Some(Command::Hooks { action }) => cli::hooks::hooks(action)?,
+        Some(Command::Ingest) => cli::ingest::ingest()?,
         Some(Command::Init) => cli::init::init()?,
         Some(Command::Set(args)) => cli::set::set(args)?,
         Some(Command::Policy(args)) => cli::policy::policy(args)?,

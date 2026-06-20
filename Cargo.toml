@@ -53,7 +53,9 @@ crossterm = "0.28"
 # --- config + serialization ---------------------------------------------------
 # serde powers both the wire types (one LoopEvent) and the YAML config.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps a parsed JSON object's key order on round-trip, so
+# `loop hooks` edits the user's real ~/.claude/settings.json without churning it.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
 # --- filesystem locations -----------------------------------------------------

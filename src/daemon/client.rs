@@ -213,6 +213,23 @@ impl DaemonClient {
         resp.json().context("decoding events")
     }
 
+    /// `POST /ingest` — forward a raw CC hook payload (already JSON) to the
+    /// daemon and return the run's verdict. Short timeout: this runs inside the
+    /// user's `claude` session and must not stall it.
+    pub fn ingest(&self, payload: &str) -> Result<crate::observer::webhook::IngestResponse> {
+        let resp = self
+            .http
+            .post(format!("{}/ingest", self.base))
+            .header("content-type", "application/json")
+            .timeout(Duration::from_secs(2))
+            .body(payload.to_string())
+            .send()
+            .context("POST /ingest")?
+            .error_for_status()
+            .context("ingest")?;
+        resp.json().context("decoding ingest response")
+    }
+
     /// `POST /runs/:id/kill`.
     pub fn request_kill(&self, id: &str) -> Result<()> {
         let resp = self
