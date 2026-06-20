@@ -186,6 +186,42 @@ impl DaemonClient {
         Ok(())
     }
 
+    /// `POST /runs/:id/pause` — checkpoint + stop an owned run (ARCHITECTURE §4).
+    /// The daemon rejects this (`400`) for observed/finished runs; its message is
+    /// surfaced verbatim so the caller can show it.
+    pub fn pause(&self, id: &str) -> Result<()> {
+        self.post_action(id, "pause")
+    }
+
+    /// `POST /runs/:id/resume` — re-spawn a paused run with its native `--resume`.
+    /// `400` (with the daemon's message) when the run isn't paused.
+    pub fn resume(&self, id: &str) -> Result<()> {
+        self.post_action(id, "resume")
+    }
+
+    /// POST `/runs/:id/<action>`, surfacing the daemon's `{ "error": … }` body on
+    /// failure (so a `400 "cannot pause"` reads clearly, not as a bare status).
+    fn post_action(&self, id: &str, action: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{}/runs/{id}/{action}", self.base))
+            .send()
+            .with_context(|| format!("POST /runs/{id}/{action}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            bail!("no such run: {id}");
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let msg = resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_else(|| status.to_string());
+            bail!("{msg}");
+        }
+        Ok(())
+    }
+
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base);
         self.http
