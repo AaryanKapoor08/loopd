@@ -667,44 +667,35 @@ mod tests {
         assert_eq!(run.status, RunStatus::Stuck);
     }
 
-    /// Live(ish) gate: the tick kills a **real owned process** when it trips a
-    /// cap under `--on-trip kill`. Spawns a long `ping`/`sleep` (no agent tokens),
-    /// trips the cost cap, runs one tick, and asserts the process is taken down
-    /// and the run lands `Killed`. Verifies the tick→on-trip→supervisor path that
-    /// can't be exercised by the pure detector tests.
-    #[test]
-    fn governance_tick_kills_a_real_owned_process_over_a_cost_cap() {
-        use crate::agents::claude::ClaudeAdapter;
-        use crate::agents::{Adapter, RunOpts, StreamParser};
-        use crate::config::OnTrip;
-        use std::time::{Duration, Instant};
-
-        // A throwaway adapter whose program is a long-running system command; it
-        // reuses the Claude parser (non-JSON output → harmless Output events).
-        struct SleeperAdapter;
-        impl Adapter for SleeperAdapter {
-            fn id(&self) -> &str {
-                "sleeper"
-            }
-            fn program(&self) -> &str {
-                if cfg!(windows) {
-                    "ping"
-                } else {
-                    "sh"
-                }
-            }
-            fn build_args(&self, _t: &str, _o: &RunOpts) -> Vec<String> {
-                Vec::new()
-            }
-            fn resume_args(&self, _s: &str, _t: &str, _o: &RunOpts) -> Vec<String> {
-                Vec::new()
-            }
-            fn new_parser(&self, run_id: &str) -> Box<dyn StreamParser> {
-                ClaudeAdapter::new().new_parser(run_id)
+    /// A throwaway adapter whose program is a long-running system command; it
+    /// reuses the Claude parser (non-JSON output → harmless Output events). Lets
+    /// the tick tests act on a *real owned process* without spending agent tokens.
+    struct SleeperAdapter;
+    impl crate::agents::Adapter for SleeperAdapter {
+        fn id(&self) -> &str {
+            "sleeper"
+        }
+        fn program(&self) -> &str {
+            if cfg!(windows) {
+                "ping"
+            } else {
+                "sh"
             }
         }
+        fn build_args(&self, _t: &str, _o: &RunOpts) -> Vec<String> {
+            Vec::new()
+        }
+        fn resume_args(&self, _s: &str, _t: &str, _o: &RunOpts) -> Vec<String> {
+            Vec::new()
+        }
+        fn new_parser(&self, run_id: &str) -> Box<dyn crate::agents::StreamParser> {
+            crate::agents::claude::ClaudeAdapter::new().new_parser(run_id)
+        }
+    }
 
-        let state = test_state();
+    /// Seed an owned, cost-cap-tripping run and spawn a real ~30s process under
+    /// the supervisor for it, opting it into `on_trip`. Returns the run id.
+    fn spawn_capped_sleeper(state: &AppState, on_trip: OnTrip) -> String {
         let run_id = new_run_id();
         {
             let store = state.store.lock().unwrap();
@@ -712,14 +703,11 @@ mod tests {
             run.agent = "claude".into();
             run.owned = true;
             run.status = RunStatus::Running;
-            // Trip the cost cap immediately, and opt this run into kill-on-trip.
-            run.cost_usd = 1.0;
+            run.cost_usd = 1.0; // already over the cap below
             run.max_cost_usd = Some(0.5);
-            run.on_trip = Some(OnTrip::Kill);
+            run.on_trip = Some(on_trip);
             store.upsert_run(&run).unwrap();
         }
-
-        // Spawn the real long-running process under the supervisor (~30s sleeper).
         let args: Vec<String> = if cfg!(windows) {
             vec!["-n".into(), "30".into(), "127.0.0.1".into()]
         } else {
@@ -729,27 +717,58 @@ mod tests {
             .supervisor
             .spawn_raw(&SleeperAdapter, &run_id, &args, "", state.store.clone())
             .expect("spawn sleeper");
-        assert!(handle.pid.is_some(), "need a pid to kill");
-        std::thread::sleep(Duration::from_millis(400)); // let it start
+        assert!(handle.pid.is_some(), "need a pid to act on");
+        std::thread::sleep(std::time::Duration::from_millis(400)); // let it start
+        run_id
+    }
+
+    /// Wait until `run_id` leaves `Running`, or `within` elapses.
+    fn await_not_running(state: &AppState, run_id: &str, within: std::time::Duration) -> Run {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let run = state.store.lock().unwrap().get_run(run_id).unwrap().unwrap();
+            if run.status != RunStatus::Running || std::time::Instant::now() >= deadline {
+                return run;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Live(ish) gate: the tick **kills** a real owned process over a cost cap
+    /// under `--on-trip kill`. Verifies the tick→on-trip→supervisor path the pure
+    /// detector tests can't reach.
+    #[test]
+    fn governance_tick_kills_a_real_owned_process_over_a_cost_cap() {
+        let state = test_state();
+        let run_id = spawn_capped_sleeper(&state, OnTrip::Kill);
 
         let mut gov = Governor::new();
         governance_tick(&state, &mut gov);
 
-        // The tick should have flagged + killed it; wait for the terminal state.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let run = loop {
-            let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
-            if run.status != RunStatus::Running || Instant::now() >= deadline {
-                break run;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
+        let run = await_not_running(&state, &run_id, std::time::Duration::from_secs(15));
         assert!(
             run.flags.contains(&"cap-cost".to_string()),
             "expected cap-cost flag, got {:?}",
             run.flags
         );
         assert_eq!(run.status, RunStatus::Killed, "the tick must kill the run");
+    }
+
+    /// Live(ish) gate: the tick **pauses** (checkpoint + stop) a real owned
+    /// process over a cost cap under `--on-trip pause`, so the run is resumable.
+    #[test]
+    fn governance_tick_pauses_a_real_owned_process_over_a_cost_cap() {
+        let state = test_state();
+        let run_id = spawn_capped_sleeper(&state, OnTrip::Pause);
+
+        let mut gov = Governor::new();
+        governance_tick(&state, &mut gov);
+
+        let run = await_not_running(&state, &run_id, std::time::Duration::from_secs(15));
+        assert!(run.flags.contains(&"cap-cost".to_string()));
+        assert_eq!(run.status, RunStatus::Paused, "the tick must pause the run");
+        // A paused run is resumable, not ended.
+        assert!(run.ended_at.is_none(), "a paused run is not ended");
     }
 
     #[tokio::test]
