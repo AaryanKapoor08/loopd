@@ -143,6 +143,25 @@ pub enum RunReason {
     Sdk,
 }
 
+/// The daemon's verdict on a run, returned by `POST /ingest`. This is the
+/// enforcement return channel (ARCHITECTURE §4): a Mode-B hook reads it for
+/// liveness, and the Phase-9 SDK's `.check()` throws/halts under `pause`/`kill`.
+/// Mode B can only ever yield `ok`/`warn` (observed runs are read-only and their
+/// on-trip action clamps to `notify`); `pause`/`kill` are reserved for owned SDK
+/// runs. Modeled now so the wire shape is stable before the SDK consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Healthy — keep going.
+    Ok,
+    /// Flagged; surface a warning but keep going.
+    Warn,
+    /// The caller should checkpoint and stop (owned runs).
+    Pause,
+    /// The caller should stop for good (owned runs).
+    Kill,
+}
+
 /// One normalized event. Every surface emits this shape; the store, detector,
 /// and dashboard only ever see `LoopEvent`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -368,6 +387,9 @@ mod tests {
         std::fs::create_dir_all(&out).expect("create sdk/src/types");
         LoopEvent::export_all_to(&out).expect("export LoopEvent + deps");
         Run::export_all_to(&out).expect("export Run + deps");
+        // The Mode-B / SDK ingest return channel (ARCHITECTURE §4).
+        crate::observer::webhook::IngestResponse::export_all_to(&out)
+            .expect("export IngestResponse + Verdict");
     }
 
     #[test]

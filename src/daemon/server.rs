@@ -32,6 +32,7 @@ use crate::config::{Config, OnTrip};
 use crate::core::detector::{Action, Governor};
 use crate::core::events::{new_run_id, now_ms, LoopEvent, Run, RunReason, RunStatus};
 use crate::core::store::Store;
+use crate::observer::webhook::IngestResponse;
 use crate::supervisor::SupervisorRegistry;
 
 /// How often the governance detector sweeps live runs.
@@ -470,9 +471,16 @@ async fn resume_run(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Mode-B ingest (CC hooks / SDK). Stub until the observer lands.
-async fn ingest() -> ApiError {
-    ApiError::NotImplemented("/ingest lands in Phase 7 (observer) / Phase 9 (SDK)")
+/// Mode-B ingest (CC hooks). Normalizes the hook payload, correlates it to the
+/// observed (read-only) run for its session, and returns the run's current
+/// verdict — the enforcement return channel the Phase-9 SDK reuses
+/// (ARCHITECTURE §4). Accepts the raw hook JSON (not our wire shape), so the body
+/// is a lenient `serde_json::Value`.
+async fn ingest(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<IngestResponse> {
+    Json(crate::observer::webhook::ingest_hook(&state.store, &payload))
 }
 
 // --- errors ------------------------------------------------------------------
@@ -598,19 +606,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_still_returns_501() {
-        // /ingest (Mode B / SDK) is the only stub left after Phase 3.
-        let resp = app(test_state())
+    async fn ingest_creates_an_observed_run_and_returns_a_verdict() {
+        // A CC SessionStart hook payload (Mode B). /ingest correlates it to a new
+        // observed run and returns the verdict channel.
+        let state = test_state();
+        let body = serde_json::json!({
+            "session_id": "sess_route_1",
+            "cwd": "C:\\dev\\loop",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+        });
+        let resp = app(state.clone())
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/ingest")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert!(v["runId"].is_string());
+        assert_eq!(v["verdict"], "ok");
+
+        // The run is observed (read-only) and shows up in /runs.
+        let runs = state.store.lock().unwrap().list_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(!runs[0].owned);
     }
 
     #[tokio::test]
