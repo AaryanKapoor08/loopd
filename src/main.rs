@@ -22,7 +22,6 @@ mod config;
 mod core;
 #[allow(dead_code)]
 mod daemon;
-#[allow(dead_code)]
 mod dashboard;
 #[allow(dead_code)]
 mod observer;
