@@ -1,0 +1,30 @@
+# Rust build output
+target/
+
+# dependencies (TS SDK lives under sdk/ after the Phase 0 restructure)
+node_modules/
+sdk/node_modules/
+
+# build output
+dist/
+sdk/dist/
+
+# cloned reference repos — study only, NOT part of loopd, do not commit
+reference/
+
+# loopd runtime data
+.loopd/
+
+# planning docs — kept on disk, intentionally untracked
+PLAN.md
+REFERENCES.md
+ARCHITECTURE.md
+HANDOFF.md
+claude/
+
+# logs / os / editor
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,23 @@
+[package]
+name = "loopd"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A vendor-neutral control plane for AI agent loops: see, unify, and govern every agent loop in one cockpit."
+license = "MIT"
+repository = "https://github.com/AaryanKapoor08/loopd"
+keywords = ["ai", "agents", "claude-code", "observability", "governance"]
+categories = ["command-line-utilities", "development-tools"]
+
+# One binary is the whole engine (daemon, supervisor, TUI, CLI). Users may
+# alias it to `loop`; the shipped command is `loopd`.
+[[bin]]
+name = "loopd"
+path = "src/main.rs"
+
+[dependencies]
+# Phase 0 keeps the dependency set minimal: just enough to parse args and
+# print help. The full engine crates (tokio, axum, rusqlite, ...) land in the
+# next commit so the dependency surface is reviewable on its own.
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
