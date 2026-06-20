@@ -1,0 +1,3 @@
+ts-rs writes generated wire types here (LoopEvent, Run, ...) via
+`cargo test export_bindings` in the Rust core. Do not hand-edit. This
+placeholder keeps the directory tracked until the first export lands.
