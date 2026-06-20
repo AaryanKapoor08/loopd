@@ -1,0 +1,57 @@
+{
+  "name": "loopd",
+  "version": "0.1.0",
+  "description": "The cockpit for your AI agent loops. Spawn, supervise, and observe Claude Code (and other) agent loops from one place.",
+  "type": "module",
+  "bin": {
+    "loop": "./dist/bin/loop.js",
+    "loopd": "./dist/bin/loop.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx bin/loop.ts",
+    "start": "node dist/bin/loop.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "claude",
+    "claude-code",
+    "loop-engineering",
+    "orchestration",
+    "observability",
+    "supervisor",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "chokidar": "^4.0.3",
+    "commander": "^13.1.0",
+    "ink": "^5.1.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.1",
+    "@types/react": "^18.3.18",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
