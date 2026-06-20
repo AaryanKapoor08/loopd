@@ -17,9 +17,15 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// The `~/.loopd` directory (not created — see [`ensure_loopd_dir`]). Falls back
-/// to `.loopd` in the current directory if the home directory can't be resolved.
+/// The loopd data directory. `$LOOPD_DIR` wins when set (a custom data dir, and
+/// what tests use to isolate `~/.loopd` — note `dirs::home_dir()` ignores env on
+/// Windows, so an env override is the only portable way to redirect it).
+/// Otherwise `~/.loopd`, falling back to `.loopd` in the cwd if the home
+/// directory can't be resolved. Not created — see [`ensure_loopd_dir`].
 pub fn loopd_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("LOOPD_DIR") {
+        return PathBuf::from(dir);
+    }
     match dirs::home_dir() {
         Some(home) => home.join(".loopd"),
         None => PathBuf::from(".loopd"),

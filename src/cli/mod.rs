@@ -5,4 +5,9 @@
 //! translates arguments into a daemon API call and renders the response. No
 //! business logic lives in the CLI.
 //!
-//! Planned contents (Phase 4): one module/function per command.
+//! Contents:
+//! - `daemon` — `loop daemon {start,stop,status,serve}` (Phase 2).
+//!
+//! Planned (Phase 4): one module/function per remaining command.
+
+pub mod daemon;

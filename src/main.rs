@@ -64,8 +64,26 @@ enum Command {
     Kill,
     /// Print a run's event log. (Phase 4)
     Logs,
-    /// Manage the background daemon (start/stop/status). (Phase 2)
-    Daemon,
+    /// Manage the background daemon. (Phase 2)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+/// `loop daemon <action>`.
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon (detached) and wait until it is healthy.
+    Start,
+    /// Stop the daemon and remove its pidfile (idempotent).
+    Stop,
+    /// Show whether the daemon is running and healthy.
+    Status,
+    /// Internal: run the HTTP server in the foreground. The detached child runs
+    /// this; users call `start`/`stop`/`status`.
+    #[command(hide = true)]
+    Serve,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,9 +95,15 @@ fn main() -> anyhow::Result<()> {
             Cli::command().print_help()?;
             println!();
         }
+        Some(Command::Daemon { action }) => match action {
+            DaemonAction::Start => cli::daemon::start()?,
+            DaemonAction::Stop => cli::daemon::stop()?,
+            DaemonAction::Status => cli::daemon::status()?,
+            DaemonAction::Serve => cli::daemon::serve()?,
+        },
+        // The rest land in Phases 3–7.
         Some(_) => {
-            println!("loopd: command not yet implemented (Phase 0 scaffold).");
-            println!("See claude/BuildFlow.md for the build sequence.");
+            println!("loopd: command not yet implemented (see claude/BuildFlow.md).");
         }
     }
 
