@@ -8,9 +8,10 @@
 //!
 //! Contents:
 //! - `server`    — `axum` routes (`/health`, `/runs`, `/runs/:id`, `/ingest`, ...).
+//! - `lifecycle` — start detached, write `~/.loopd/daemon.pid` + log; stop; status.
 //!
 //! Planned (rest of Phase 2):
-//! - `lifecycle` — start detached, write `~/.loopd/daemon.pid` + log; stop; status.
 //! - `client`    — `DaemonClient` used by every CLI command; auto-starts the daemon.
 
+pub mod lifecycle;
 pub mod server;
