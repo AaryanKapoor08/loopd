@@ -101,6 +101,9 @@ pub async fn serve(state: AppState) -> Result<()> {
     // a stop flag so daemon shutdown winds it down cleanly.
     let stop = Arc::new(AtomicBool::new(false));
     let tick_handle = spawn_governance(state.clone(), stop.clone());
+    // Mode-B observer: tail user-started `claude` transcripts read-only. Shares
+    // the same stop flag so shutdown winds it down with the governance tick.
+    let tail_handle = crate::observer::transcript::spawn(state.store.clone(), stop.clone());
 
     let result = axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -109,6 +112,9 @@ pub async fn serve(state: AppState) -> Result<()> {
 
     stop.store(true, Ordering::Relaxed);
     if let Some(h) = tick_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = tail_handle {
         let _ = h.join();
     }
     result
