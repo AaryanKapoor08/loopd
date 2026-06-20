@@ -9,11 +9,11 @@
 //! - `events`   — `LoopEvent`, `Run`, and their enums (`#[derive(Serialize, TS)]`).
 //! - `pricing`  — model→price map; cost fallback when an agent reports tokens only.
 //! - `store`    — `rusqlite` (WAL) persistence; daemon-only writer.
-//!
-//! Planned (later phases):
 //! - `detector` — governance: caps + runaway/no-progress detection (Phase 6).
 //! - `git`      — read-only `git diff` hashing for the no-progress signal (Phase 6).
 
+pub mod detector;
 pub mod events;
+pub mod git;
 pub mod pricing;
 pub mod store;

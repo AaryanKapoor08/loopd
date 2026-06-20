@@ -26,6 +26,8 @@ mod dashboard;
 #[allow(dead_code)]
 mod observer;
 #[allow(dead_code)]
+mod policies;
+#[allow(dead_code)]
 mod supervisor;
 
 use clap::{CommandFactory, Parser, Subcommand};
