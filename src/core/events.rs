@@ -301,6 +301,19 @@ mod tests {
         assert!(a.starts_with("run_"));
     }
 
+    /// Export the wire types to the TS SDK. This is the `ts-rs` codegen step
+    /// (`cargo test export_bindings`): it writes `LoopEvent`, `Run`, and all
+    /// their enum dependencies into `sdk/src/types/` so `@loopd/sdk` builds
+    /// against types generated from this Rust model — never hand-written ones.
+    /// The SDK's npm `prebuild` runs this before `tsc` (export ordering, §8 Q9).
+    #[test]
+    fn export_bindings() {
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk/src/types");
+        std::fs::create_dir_all(&out).expect("create sdk/src/types");
+        LoopEvent::export_all_to(&out).expect("export LoopEvent + deps");
+        Run::export_all_to(&out).expect("export Run + deps");
+    }
+
     #[test]
     fn loop_event_round_trips_through_json() {
         let mut ev = LoopEvent::new("run_x", Source::Supervisor, EventKind::ToolUse);

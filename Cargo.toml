@@ -58,8 +58,9 @@ notify = "6"
 
 # --- TS type export -----------------------------------------------------------
 # Wire types are defined once in Rust and exported to the TS SDK via ts-rs,
-# so the SDK never drifts from the core model.
-ts-rs = "10"
+# so the SDK never drifts from the core model. `import-esm` makes generated
+# imports use `.js` extensions, required by the SDK's NodeNext resolution.
+ts-rs = { version = "10", features = ["import-esm"] }
 
 # --- diagnostics --------------------------------------------------------------
 tracing = "0.1"
