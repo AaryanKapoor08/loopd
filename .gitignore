@@ -15,7 +15,10 @@ reference/
 # loopd runtime data
 .loopd/
 
-# planning docs — kept on disk, intentionally untracked
+# docs & planning — kept on disk, intentionally untracked.
+# Blanket-ignore every markdown file so planning notes never reach the repo;
+# the named docs and the claude/ folder are listed too for clarity.
+*.md
 PLAN.md
 REFERENCES.md
 ARCHITECTURE.md

@@ -16,8 +16,46 @@ name = "loopd"
 path = "src/main.rs"
 
 [dependencies]
-# Phase 0 keeps the dependency set minimal: just enough to parse args and
-# print help. The full engine crates (tokio, axum, rusqlite, ...) land in the
-# next commit so the dependency surface is reviewable on its own.
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+# --- CLI / errors -------------------------------------------------------------
+clap = { version = "4", features = ["derive"] }   # CLI parsing (derive)
+anyhow = "1"                                       # ergonomic error propagation
+
+# --- async runtime + HTTP -----------------------------------------------------
+# The daemon is the background brain: it owns processes and hosts a local HTTP
+# API that the CLI/TUI talk to. tokio drives it; axum serves the routes.
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+
+# --- persistence --------------------------------------------------------------
+# Single SQLite file in ~/.loopd, WAL mode. `bundled` compiles SQLite from
+# source so there is no system dependency to install (needs a C compiler at
+# build time — MSVC on Windows).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- process supervision (Mode A) --------------------------------------------
+# Spawn and own agent processes through a PTY (ConPTY on Windows) so we capture
+# their streaming output the way a terminal would.
+portable-pty = "0.8"
+
+# --- TUI cockpit --------------------------------------------------------------
+ratatui = "0.28"
+crossterm = "0.28"
+
+# --- config + serialization ---------------------------------------------------
+# serde powers both the wire types (one LoopEvent) and the YAML config.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# --- filesystem watching (Mode B observer) -----------------------------------
+# Tail Claude Code transcript JSONL files as they are appended.
+notify = "6"
+
+# --- TS type export -----------------------------------------------------------
+# Wire types are defined once in Rust and exported to the TS SDK via ts-rs,
+# so the SDK never drifts from the core model.
+ts-rs = "10"
+
+# --- diagnostics --------------------------------------------------------------
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
