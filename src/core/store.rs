@@ -247,6 +247,22 @@ impl Store {
         }
     }
 
+    /// Find the run for an agent session id (CC `session_id` / Codex `thread_id`).
+    /// Used by the Mode-B observer to correlate hook + transcript events to one
+    /// run. Newest-started wins if a session id were ever reused.
+    pub fn get_run_by_session_id(&self, session_id: &str) -> Result<Option<Run>> {
+        let res = self.conn.query_row(
+            "SELECT * FROM runs WHERE agent_session_id = ?1 ORDER BY started_at DESC LIMIT 1",
+            params![session_id],
+            row_to_run,
+        );
+        match res {
+            Ok(run) => Ok(Some(run)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context("querying run by session id"),
+        }
+    }
+
     /// List all runs, newest-started first.
     pub fn list_runs(&self) -> Result<Vec<Run>> {
         let mut stmt = self

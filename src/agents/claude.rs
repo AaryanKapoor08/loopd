@@ -19,6 +19,7 @@
 //! - `mcp__server__tool` is displayed as `mcp:server:tool`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -87,6 +88,24 @@ impl Adapter for ClaudeAdapter {
     fn env(&self) -> Vec<(String, String)> {
         // Mute npx/npm chatter so it doesn't interleave with the JSON stream.
         vec![("NPM_CONFIG_LOGLEVEL".to_string(), "error".to_string())]
+    }
+
+    /// Mode-B routing: a Claude Code transcript is a `*.jsonl` under a `projects`
+    /// directory (`~/.claude/projects/<munged-cwd>/<session_id>.jsonl`). The same
+    /// [`ClaudeParser`] consumes it — one parser, two feeds (ARCHITECTURE §6).
+    fn match_transcript(&self, path: &Path) -> bool {
+        path.extension().map(|e| e == "jsonl").unwrap_or(false)
+            && path.components().any(|c| c.as_os_str() == "projects")
+    }
+
+    /// Mode-B routing: pull the agent session id out of a CC hook payload. Every
+    /// CC hook event carries `session_id` (verified live, §8 Q7), which is our
+    /// `agent_session_id` correlation key.
+    fn match_hook(&self, payload: &serde_json::Value) -> Option<String> {
+        payload
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
     }
 }
 
@@ -193,12 +212,24 @@ impl ClaudeParser {
             Err(_) => return Vec::new(),
         };
         self.capture_session(&line.session_id);
-        let is_main = line.parent_tool_use_id.is_none();
+        // Main-run turn = not a sub-agent. Mode A marks sub-agents with
+        // `parent_tool_use_id`; the Mode-B transcript marks them with the
+        // envelope `isSidechain` flag (verified, §8 Q8). Either excludes the turn
+        // from the run's token/iteration rollup.
+        let is_main = line.parent_tool_use_id.is_none() && !line.is_sidechain;
         if is_main {
             self.state.iteration = self.state.iteration.saturating_add(1);
         }
         if self.state.model.is_none() {
             self.state.model = line.message.model.clone();
+        }
+        // Transcripts carry no `system/init` line, so the window is never seeded
+        // there. Derive a best-effort window from the model id once it's known
+        // (Mode A already has it from `init`, so this is a no-op there).
+        if self.state.context_window.is_none() {
+            if let Some(model) = &self.state.model {
+                self.state.context_window = Some(context_window_for(model));
+            }
         }
 
         let mut events = Vec::new();
@@ -427,11 +458,14 @@ fn strip_ansi(s: &str) -> String {
 
 // --- the lean subset of CC's stream-json schema we deserialize ----------------
 
+// The `sessionId` aliases below let the SAME structs deserialize both feeds:
+// Mode-A stream-json uses snake_case `session_id`; the Mode-B transcript uses
+// camelCase `sessionId` (verified, §8 Q8). One parser, two feeds (§6).
 #[derive(Deserialize)]
 struct SystemLine {
     #[serde(default)]
     subtype: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -440,16 +474,19 @@ struct SystemLine {
 #[derive(Deserialize)]
 struct AssistantLine {
     message: Message,
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
     #[serde(default)]
     parent_tool_use_id: Option<String>,
+    /// Transcript envelope flag marking a sub-agent (sidechain) turn.
+    #[serde(default, alias = "isSidechain")]
+    is_sidechain: bool,
 }
 
 #[derive(Deserialize)]
 struct UserLine {
     message: Message,
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
     #[serde(default)]
     parent_tool_use_id: Option<String>,
@@ -554,7 +591,7 @@ struct ResultLine {
     total_cost_usd: Option<f64>,
     #[serde(default)]
     num_turns: Option<u32>,
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     session_id: Option<String>,
     #[serde(default)]
     error: Option<String>,
@@ -573,6 +610,7 @@ struct ModelUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::events::DEFAULT_CONTEXT_WINDOW;
 
     fn parse_all(p: &mut ClaudeParser, lines: &[&str]) -> Vec<LoopEvent> {
         let mut out = Vec::new();
@@ -669,6 +707,54 @@ mod tests {
         let st = p.run_state();
         assert_eq!(st.tokens_in, 0, "subagent tokens must not fold into the run total");
         assert_eq!(st.iteration, 0, "subagent turn must not bump iteration");
+    }
+
+    // --- Mode B: the SAME parser consumes transcript JSONL lines (§6). These are
+    // pinned from a live `~/.claude/projects/**/*.jsonl` capture (CC 2.x,
+    // 2026-06-20): camelCase `sessionId`, an `isSidechain` envelope, `message.usage`,
+    // and a `tool_use` block with a `caller` field. No `system/init` or `result`
+    // line ever appears in a transcript. Re-verify on CC upgrade.
+    const TRANSCRIPT_ASSISTANT: &str = r#"{"parentUuid":"p0","isSidechain":false,"message":{"model":"claude-opus-4-8","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_aaa","name":"Read","input":{"file_path":"/x"},"caller":"agent"}],"usage":{"input_tokens":8260,"cache_creation_input_tokens":7377,"cache_read_input_tokens":20806,"output_tokens":250}},"requestId":"req_1","type":"assistant","uuid":"u-assist-1","timestamp":"2026-06-20T22:00:00Z","sessionId":"sess_xyz","cwd":"/x","version":"2.1.183","gitBranch":"main"}"#;
+    const TRANSCRIPT_USER_RESULT: &str = r#"{"parentUuid":"u-assist-1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_aaa","type":"tool_result","content":"file contents"}]},"uuid":"u-user-1","timestamp":"2026-06-20T22:00:01Z","sessionId":"sess_xyz","cwd":"/x","gitBranch":"main"}"#;
+    const TRANSCRIPT_SIDECHAIN: &str = r#"{"parentUuid":"p9","isSidechain":true,"message":{"model":"claude-opus-4-8","role":"assistant","content":[{"type":"text","text":"sub work"}],"usage":{"input_tokens":5000,"output_tokens":500}},"type":"assistant","uuid":"u-sc-1","timestamp":"2026-06-20T22:00:02Z","sessionId":"sess_xyz"}"#;
+
+    #[test]
+    fn transcript_lines_feed_the_same_parser() {
+        let mut p = ClaudeParser::new("obs_1");
+        let events = parse_all(&mut p, &[TRANSCRIPT_ASSISTANT, TRANSCRIPT_USER_RESULT]);
+
+        // session id is learned from camelCase `sessionId` (Mode-B feed).
+        assert_eq!(p.session_id(), Some("sess_xyz"));
+
+        // The tool_use → tool_result pair is recognized across the two lines.
+        let tu = events.iter().find(|e| e.kind == EventKind::ToolUse).unwrap();
+        assert_eq!(tu.tool.as_deref(), Some("Read"));
+        let tr = events.iter().find(|e| e.kind == EventKind::ToolResult).unwrap();
+        assert_eq!(tr.tool.as_deref(), Some("Read"));
+
+        let st = p.run_state();
+        assert_eq!(st.model.as_deref(), Some("claude-opus-4-8"));
+        // Window is seeded (non-None) from the model id. Transcripts carry no
+        // `result.modelUsage` line, so it stays the conservative default rather
+        // than the model's true window — a documented Mode-B limitation (the
+        // ctx% can read high for a 1M-window model observed read-only).
+        assert_eq!(st.context_window, Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(st.iteration, 1); // one main assistant turn
+        // total_input = 8260 + 7377 cache-create + 20806 cache-read = 36443.
+        assert_eq!(st.tokens_in, 36_443);
+        assert_eq!(st.tokens_out, 250);
+        // No `result` line → cost is computed from usage (transcript has no cost).
+        assert!(st.cost_usd.is_some());
+    }
+
+    #[test]
+    fn transcript_sidechain_turns_are_excluded_from_rollup() {
+        let mut p = ClaudeParser::new("obs_2");
+        parse_all(&mut p, &[TRANSCRIPT_ASSISTANT, TRANSCRIPT_SIDECHAIN]);
+        let st = p.run_state();
+        // Only the main turn counts; the isSidechain turn adds nothing.
+        assert_eq!(st.iteration, 1, "isSidechain turn must not bump iteration");
+        assert_eq!(st.tokens_in, 36_443, "isSidechain tokens must not fold in");
     }
 
     #[test]
