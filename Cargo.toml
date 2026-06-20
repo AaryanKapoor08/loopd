@@ -42,6 +42,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # their streaming output the way a terminal would.
 portable-pty = "0.8"
 
+# A PTY can wrap the agent's line-delimited JSON in ANSI/line-discipline noise;
+# strip escape sequences before parsing each line.
+strip-ansi-escapes = "0.2"
+
 # --- TUI cockpit --------------------------------------------------------------
 ratatui = "0.28"
 crossterm = "0.28"
