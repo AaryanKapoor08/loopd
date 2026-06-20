@@ -14,7 +14,10 @@
 pub mod daemon;
 pub mod dash;
 pub mod hooks;
+pub mod init;
 pub mod kill;
 pub mod logs;
+pub mod policy;
 pub mod ps;
 pub mod run;
+pub mod set;

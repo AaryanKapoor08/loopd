@@ -64,6 +64,10 @@ enum Command {
     Kill(cli::kill::KillArgs),
     /// Print a run's event log. (Phase 4)
     Logs(cli::logs::LogsArgs),
+    /// Set a config value in ~/.loopd/config.yaml. (Phase 4)
+    Set(cli::set::SetArgs),
+    /// Show or edit the governance policy. (Phase 4)
+    Policy(cli::policy::PolicyArgs),
     /// Manage the background daemon. (Phase 2)
     Daemon {
         #[command(subcommand)]
@@ -112,10 +116,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Logs(args)) => cli::logs::logs(args)?,
         Some(Command::Dash) => cli::dash::dash()?,
         Some(Command::Hooks { action }) => cli::hooks::hooks(action)?,
-        // `init`/`set`/`policy` land in the next Phase-4 part.
-        Some(Command::Init) => {
-            println!("loop init: lands in the next Phase-4 part (config bootstrap).");
-        }
+        Some(Command::Init) => cli::init::init()?,
+        Some(Command::Set(args)) => cli::set::set(args)?,
+        Some(Command::Policy(args)) => cli::policy::policy(args)?,
     }
 
     Ok(())
