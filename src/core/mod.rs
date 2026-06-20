@@ -16,3 +16,4 @@
 
 pub mod events;
 pub mod pricing;
+pub mod store;
