@@ -139,7 +139,20 @@ fn spawn_detached(_config: &Config) -> Result<u32> {
     }
     // On unix, redirected stdio + the CLI exiting leaves the daemon orphaned and
     // reparented to init — sufficient for v1. Full `setsid` daemonization is a
-    // later refinement (needs a libc/nix dep we don't carry yet).
+    // later refinement (needs a libc/nix dep we don't carry yet). Unix also marks
+    // its internal pipe fds `CLOEXEC`, so the inheritance leak fixed below for
+    // Windows does not exist there.
+
+    // PART F: keep the daemon from inheriting *our* std handles. `std`'s Windows
+    // spawn sets `bInheritHandles=TRUE`, so besides the log handles we redirect
+    // explicitly, the child inherits every inheritable handle in this process —
+    // including our own stdout/stderr. If `loop daemon start` runs with its output
+    // captured through a **pipe**, that pipe's write end leaks into the long-lived
+    // daemon and the pipe never reaches EOF, blocking the caller until the daemon
+    // dies. The guard clears `HANDLE_FLAG_INHERIT` on our std handles across the
+    // spawn (and restores it on drop); the daemon still receives the log handles.
+    #[cfg(windows)]
+    let _no_inherit = win::NoInheritStdio::engage();
 
     let child = cmd
         .spawn()
@@ -204,6 +217,68 @@ fn kill_pid(pid: u32) {
 #[cfg(not(windows))]
 fn kill_pid(pid: u32) {
     let _ = Command::new("kill").arg(pid.to_string()).status();
+}
+
+/// Windows-only handle-inheritance hygiene for [`spawn_detached`] (PART F).
+#[cfg(windows)]
+mod win {
+    use std::os::windows::io::RawHandle;
+
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // -10
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // -11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // -12
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
+    extern "system" {
+        fn GetStdHandle(nStdHandle: u32) -> RawHandle;
+        fn GetHandleInformation(hObject: RawHandle, lpdwFlags: *mut u32) -> i32;
+        fn SetHandleInformation(hObject: RawHandle, dwMask: u32, dwFlags: u32) -> i32;
+    }
+
+    /// Clears `HANDLE_FLAG_INHERIT` on this process's std handles for the lifetime
+    /// of the guard, restoring the original flag on drop. Only handles that were
+    /// actually inheritable are touched (and restored), so an interactive console
+    /// — whose handles are not inheritable — is left untouched.
+    pub struct NoInheritStdio {
+        // (handle, original inherit bit) for each handle we cleared.
+        restore: Vec<(RawHandle, u32)>,
+    }
+
+    impl NoInheritStdio {
+        pub fn engage() -> Self {
+            let mut restore = Vec::new();
+            for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                // SAFETY: FFI to kernel32 with a std-handle id; the returned
+                // pseudo-handle is only passed back to Get/SetHandleInformation.
+                unsafe {
+                    let h = GetStdHandle(id);
+                    if h.is_null() || h as isize == -1 {
+                        continue; // no such handle (e.g. fully detached) → nothing to do
+                    }
+                    let mut flags: u32 = 0;
+                    if GetHandleInformation(h, &mut flags) == 0 {
+                        continue; // not a queryable handle → leave it alone
+                    }
+                    if flags & HANDLE_FLAG_INHERIT != 0 {
+                        SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+                        restore.push((h, flags & HANDLE_FLAG_INHERIT));
+                    }
+                }
+            }
+            Self { restore }
+        }
+    }
+
+    impl Drop for NoInheritStdio {
+        fn drop(&mut self) {
+            for (h, inherit_bit) in self.restore.drain(..) {
+                // SAFETY: `h` was a valid handle a moment ago in `engage`.
+                unsafe {
+                    SetHandleInformation(h, HANDLE_FLAG_INHERIT, inherit_bit);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
