@@ -54,20 +54,25 @@ struct Cli {
 enum Command {
     /// Create config and ensure the daemon is running. (Phase 4)
     Init,
-    /// Spawn an agent loop under loopd's supervision. (Phase 3/4)
-    Run,
+    /// Spawn an agent loop under loopd's supervision. (Phase 4)
+    Run(cli::run::RunArgs),
     /// List runs and their live status. (Phase 4)
     Ps,
     /// Open the live TUI cockpit. (Phase 5)
     Dash,
     /// Stop a run (worst action loopd ever takes). (Phase 4)
-    Kill,
+    Kill(cli::kill::KillArgs),
     /// Print a run's event log. (Phase 4)
-    Logs,
+    Logs(cli::logs::LogsArgs),
     /// Manage the background daemon. (Phase 2)
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
+    },
+    /// Manage Claude Code hooks for Mode-B observation. (Phase 7)
+    Hooks {
+        #[command(subcommand)]
+        action: cli::hooks::HooksAction,
     },
 }
 
@@ -101,9 +106,15 @@ fn main() -> anyhow::Result<()> {
             DaemonAction::Status => cli::daemon::status()?,
             DaemonAction::Serve => cli::daemon::serve()?,
         },
-        // The rest land in Phases 3–7.
-        Some(_) => {
-            println!("loopd: command not yet implemented (see claude/BuildFlow.md).");
+        Some(Command::Run(args)) => cli::run::run(args)?,
+        Some(Command::Ps) => cli::ps::ps()?,
+        Some(Command::Kill(args)) => cli::kill::kill(args)?,
+        Some(Command::Logs(args)) => cli::logs::logs(args)?,
+        Some(Command::Dash) => cli::dash::dash()?,
+        Some(Command::Hooks { action }) => cli::hooks::hooks(action)?,
+        // `init`/`set`/`policy` land in the next Phase-4 part.
+        Some(Command::Init) => {
+            println!("loop init: lands in the next Phase-4 part (config bootstrap).");
         }
     }
 

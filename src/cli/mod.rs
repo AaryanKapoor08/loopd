@@ -7,7 +7,14 @@
 //!
 //! Contents:
 //! - `daemon` — `loop daemon {start,stop,status,serve}` (Phase 2).
-//!
-//! Planned (Phase 4): one module/function per remaining command.
+//! - `run`/`ps`/`kill`/`logs` — the owned-run command surface (Phase 4).
+//! - `dash`/`hooks` — stubs forwarding to Phase 5 / Phase 7.
+//! - `init`/`set`/`policy` — config bootstrap + on-disk config edits (Phase 4).
 
 pub mod daemon;
+pub mod dash;
+pub mod hooks;
+pub mod kill;
+pub mod logs;
+pub mod ps;
+pub mod run;
