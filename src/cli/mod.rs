@@ -13,6 +13,7 @@
 
 pub mod daemon;
 pub mod dash;
+pub mod fmt;
 pub mod hooks;
 pub mod init;
 pub mod kill;

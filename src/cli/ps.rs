@@ -5,8 +5,9 @@
 
 use anyhow::Result;
 
+use crate::cli::fmt::{fmt_ctx_pct, fmt_elapsed, human, status_str, truncate};
 use crate::config::Config;
-use crate::core::events::{now_ms, Run, RunStatus};
+use crate::core::events::{now_ms, Run};
 use crate::daemon::client::DaemonClient;
 
 pub fn ps() -> Result<()> {
@@ -142,80 +143,3 @@ fn print_row(r: &Row, w: &Widths) {
     );
 }
 
-fn status_str(s: RunStatus) -> &'static str {
-    match s {
-        RunStatus::Running => "running",
-        RunStatus::Done => "done",
-        RunStatus::Failed => "failed",
-        RunStatus::Killed => "killed",
-        RunStatus::Stuck => "stuck",
-        RunStatus::Paused => "paused",
-    }
-}
-
-/// `123`, `1.2k`, `3.4M` — compact token counts.
-fn human(n: u32) -> String {
-    let n = n as f64;
-    if n < 1_000.0 {
-        format!("{}", n as u32)
-    } else if n < 1_000_000.0 {
-        format!("{:.1}k", n / 1_000.0)
-    } else {
-        format!("{:.1}M", n / 1_000_000.0)
-    }
-}
-
-/// Elapsed wall-clock from milliseconds → `12s`, `3m04s`, `1h02m`.
-fn fmt_elapsed(ms: i64) -> String {
-    let secs = (ms / 1000).max(0);
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m{s:02}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
-fn fmt_ctx_pct(used: u32, window: u32) -> String {
-    if window == 0 {
-        return "-".into();
-    }
-    format!("{:.0}%", (used as f64 / window as f64) * 100.0)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn human_is_compact() {
-        assert_eq!(human(0), "0");
-        assert_eq!(human(950), "950");
-        assert_eq!(human(1_500), "1.5k");
-        assert_eq!(human(2_400_000), "2.4M");
-    }
-
-    #[test]
-    fn elapsed_formats_by_magnitude() {
-        assert_eq!(fmt_elapsed(12_000), "12s");
-        assert_eq!(fmt_elapsed(184_000), "3m04s");
-        assert_eq!(fmt_elapsed(3_720_000), "1h02m");
-        assert_eq!(fmt_elapsed(-5), "0s");
-    }
-
-    #[test]
-    fn ctx_pct_guards_zero_window() {
-        assert_eq!(fmt_ctx_pct(0, 0), "-");
-        assert_eq!(fmt_ctx_pct(50_000, 200_000), "25%");
-    }
-}
