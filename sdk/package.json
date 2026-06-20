@@ -19,6 +19,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "prebuild": "cd .. && cargo test export_bindings --quiet",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
