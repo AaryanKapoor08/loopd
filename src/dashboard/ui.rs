@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, R
 use ratatui::Frame;
 
 use crate::cli::fmt::{fmt_ctx_pct, fmt_elapsed, fmt_event, human, status_str, truncate};
-use crate::config::{Caps, Config};
+use crate::config::{Config, Defaults};
 use crate::core::events::{now_ms, Run, RunStatus};
 
 use super::app::{App, Mode, View};
@@ -126,14 +126,26 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, config: &Config) {
     };
 
     let chunks = Layout::vertical([Constraint::Length(9), Constraint::Min(0)]).split(area);
-    draw_detail_info(frame, chunks[0], run, &config.defaults.caps);
+    draw_detail_info(frame, chunks[0], run, &config.defaults);
     draw_detail_events(frame, chunks[1], app);
 }
 
-fn draw_detail_info(frame: &mut Frame, area: Rect, run: &Run, caps: &Caps) {
+fn draw_detail_info(frame: &mut Frame, area: Rect, run: &Run, defaults: &Defaults) {
+    let caps = &defaults.caps;
+    let default_on_trip = defaults.on_trip;
     let now = now_ms();
     let end = run.ended_at.unwrap_or(now);
     let elapsed_min = (end.saturating_sub(run.started_at) / 60_000) as u32;
+
+    // Effective caps: each per-run override (loop run --max-*) wins over the
+    // config default. These are what the governance engine actually enforces.
+    let max_iter = run.max_iterations.unwrap_or(caps.max_iterations);
+    let max_cost = run.max_cost_usd.unwrap_or(caps.max_cost_usd);
+    let max_dur = run.max_duration_min.unwrap_or(caps.max_duration_min);
+    let on_trip = run
+        .on_trip
+        .unwrap_or(default_on_trip)
+        .word();
 
     let mut lines = vec![
         Line::from(vec![
@@ -151,15 +163,15 @@ fn draw_detail_info(frame: &mut Frame, area: Rect, run: &Run, caps: &Caps) {
         Line::from(format!("prompt: {}", run.prompt)),
         Line::from(vec![
             Span::raw("caps:   "),
-            cap_span(format!("iter {}/{}", run.iteration, caps.max_iterations), run.iteration as f64, caps.max_iterations as f64),
+            cap_span(format!("iter {}/{}", run.iteration, max_iter), run.iteration as f64, max_iter as f64),
             Span::raw("   "),
-            cap_span(format!("cost ${:.4}/${:.2}", run.cost_usd, caps.max_cost_usd), run.cost_usd, caps.max_cost_usd),
+            cap_span(format!("cost ${:.4}/${:.2}", run.cost_usd, max_cost), run.cost_usd, max_cost),
             Span::raw("   "),
-            cap_span(format!("dur {elapsed_min}m/{}m", caps.max_duration_min), elapsed_min as f64, caps.max_duration_min as f64),
+            cap_span(format!("dur {elapsed_min}m/{max_dur}m"), elapsed_min as f64, max_dur as f64),
             Span::raw(format!("   ctx {}", fmt_ctx_pct(run.context_tokens, run.context_window))),
         ]),
         Line::from(Span::styled(
-            "(caps are config defaults — recorded but not enforced until the governance engine, Phase 6)",
+            format!("(on-trip: {on_trip} — governance enforces these caps + runaway/context detectors)"),
             Style::new().fg(Color::DarkGray),
         )),
     ];

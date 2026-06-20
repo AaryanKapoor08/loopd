@@ -12,8 +12,11 @@
 //! `POST /ingest` (Mode B) in Phase 7. Stubs return `501 Not Implemented` with a
 //! clear message rather than pretending to work.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::extract::{Path, Query, State};
@@ -24,10 +27,15 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{adapter_for, RunOpts};
+use crate::cli::fmt::chronological;
 use crate::config::{Config, OnTrip};
+use crate::core::detector::{Action, Governor};
 use crate::core::events::{new_run_id, now_ms, LoopEvent, Run, RunReason, RunStatus};
 use crate::core::store::Store;
 use crate::supervisor::SupervisorRegistry;
+
+/// How often the governance detector sweeps live runs.
+const GOVERNANCE_TICK: Duration = Duration::from_millis(1500);
 
 /// Shared state handed to every route. `Clone` is cheap — everything is behind
 /// an `Arc`. The `Store` is additionally wrapped in a `Mutex` because a
@@ -85,11 +93,128 @@ pub async fn serve(state: AppState) -> Result<()> {
         .await
         .with_context(|| format!("binding daemon to {addr}"))?;
     tracing::info!("loopd daemon listening on http://{addr}");
-    axum::serve(listener, app(state))
+
+    // The governance detector runs on its own (blocking) thread, not a tokio
+    // task: each sweep takes the store mutex and may shell out to git / the
+    // user's test command, which would stall the async runtime. The thread polls
+    // a stop flag so daemon shutdown winds it down cleanly.
+    let stop = Arc::new(AtomicBool::new(false));
+    let tick_handle = spawn_governance(state.clone(), stop.clone());
+
+    let result = axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .context("serving daemon HTTP API")?;
-    Ok(())
+        .context("serving daemon HTTP API");
+
+    stop.store(true, Ordering::Relaxed);
+    if let Some(h) = tick_handle {
+        let _ = h.join();
+    }
+    result
+}
+
+/// Spawn the governance tick thread: sweep live runs every [`GOVERNANCE_TICK`]
+/// through the [`Governor`] until `stop` is set. Returns the join handle (or
+/// `None` if the thread couldn't be spawned — the daemon still serves).
+fn spawn_governance(state: AppState, stop: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("governance".into())
+        .spawn(move || {
+            let mut gov = Governor::new();
+            while !stop.load(Ordering::Relaxed) {
+                governance_tick(&state, &mut gov);
+                // Sleep in small slices so shutdown is observed promptly.
+                let mut waited = Duration::ZERO;
+                while waited < GOVERNANCE_TICK && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(150));
+                    waited += Duration::from_millis(150);
+                }
+            }
+        })
+        .ok()
+}
+
+/// One governance sweep: gather live runs + their recent events under the store
+/// lock, evaluate each off the lock (the [`Governor`] may touch git / tests),
+/// then persist new flags/status and apply pause/kill via the supervisor.
+///
+/// The persist step **re-reads** each run and merges only flags/status, so it
+/// never clobbers live metrics (iteration/cost/tokens) a supervisor reader thread
+/// may have written between gather and persist.
+fn governance_tick(state: &AppState, gov: &mut Governor) {
+    // 1. Gather (live runs = Running | Stuck; Paused/terminal are not evaluated).
+    let snapshot: Vec<(Run, Vec<LoopEvent>)> = {
+        let Ok(store) = state.store.lock() else {
+            return;
+        };
+        let runs = store.list_runs().unwrap_or_default();
+        runs.into_iter()
+            .filter(|r| matches!(r.status, RunStatus::Running | RunStatus::Stuck))
+            .map(|r| {
+                let events = store.events_for_run(&r.run_id, 64).unwrap_or_default();
+                (r, chronological(events))
+            })
+            .collect()
+    };
+    let live: HashSet<String> = snapshot.iter().map(|(r, _)| r.run_id.clone()).collect();
+
+    // 2. Evaluate each run (off the lock).
+    let mut to_act: Vec<(String, Vec<String>, RunStatus, Action)> = Vec::new();
+    for (run, recent) in &snapshot {
+        let decision = gov.evaluate(run, recent, &state.config);
+        if let Some(log) = &decision.log {
+            tracing::warn!("{log}");
+        }
+        // Desired live status from the (non-process) action.
+        let desired_status = match decision.action {
+            Action::Warn | Action::Notify if !decision.flags.is_empty() => RunStatus::Stuck,
+            Action::None if run.status == RunStatus::Stuck => RunStatus::Running, // recovered
+            _ => run.status, // Pause/Kill: the supervisor sets the terminal status
+        };
+        let flags_changed = decision.flags != run.flags;
+        let status_changed = desired_status != run.status;
+        let acts = matches!(decision.action, Action::Pause | Action::Kill);
+        if flags_changed || status_changed || acts {
+            to_act.push((run.run_id.clone(), decision.flags, desired_status, decision.action));
+        }
+    }
+
+    // 3. Persist flags/status (re-read + merge so live metrics aren't clobbered).
+    if !to_act.is_empty() {
+        if let Ok(store) = state.store.lock() {
+            for (id, flags, status, _) in &to_act {
+                if let Ok(Some(mut current)) = store.get_run(id) {
+                    current.flags = flags.clone();
+                    // Only touch status while the run is still live — never undo a
+                    // terminal status the supervisor wrote in the meantime.
+                    if matches!(current.status, RunStatus::Running | RunStatus::Stuck) {
+                        current.status = *status;
+                    }
+                    current.updated_at = now_ms();
+                    let _ = store.upsert_run(&current);
+                }
+            }
+        }
+    }
+
+    // 4. Apply process actions via the supervisor (off the lock). Owned runs only
+    //    reach here — clamp_action already degraded unowned pause/kill to notify.
+    for (id, _, _, action) in &to_act {
+        match action {
+            Action::Pause => {
+                state.supervisor.pause(id);
+            }
+            Action::Kill => {
+                if let Ok(store) = state.store.lock() {
+                    let _ = store.request_kill(id);
+                }
+                state.supervisor.kill(id);
+            }
+            _ => {}
+        }
+    }
+
+    gov.forget_all_except(&live);
 }
 
 /// Resolve when the daemon should shut down: Ctrl-C on any platform, or SIGTERM
@@ -504,6 +629,127 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn governance_tick_flags_a_repeating_run_and_marks_it_stuck() {
+        use crate::core::events::ToolStatus;
+
+        let state = test_state();
+        let run_id = new_run_id();
+        {
+            let store = state.store.lock().unwrap();
+            let mut run = Run::new(&run_id);
+            run.agent = "claude".into();
+            run.owned = true;
+            run.status = RunStatus::Running;
+            store.upsert_run(&run).unwrap();
+            // Three identical tool calls in a row → repeated-action (threshold 3).
+            for _ in 0..3 {
+                let mut ev = LoopEvent::new(&run_id, Source::Supervisor, EventKind::ToolUse);
+                ev.tool = Some("bash".into());
+                ev.tool_input_hash = Some(42);
+                ev.tool_status = Some(ToolStatus::Ok);
+                store.insert_event(&ev).unwrap();
+            }
+        }
+
+        let mut gov = Governor::new();
+        governance_tick(&state, &mut gov);
+
+        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert!(
+            run.flags.contains(&"repeated-action".to_string()),
+            "expected repeated-action flag, got {:?}",
+            run.flags
+        );
+        // Default on-trip is Warn → flag only, status flips to Stuck (not killed).
+        assert_eq!(run.status, RunStatus::Stuck);
+    }
+
+    /// Live(ish) gate: the tick kills a **real owned process** when it trips a
+    /// cap under `--on-trip kill`. Spawns a long `ping`/`sleep` (no agent tokens),
+    /// trips the cost cap, runs one tick, and asserts the process is taken down
+    /// and the run lands `Killed`. Verifies the tick→on-trip→supervisor path that
+    /// can't be exercised by the pure detector tests.
+    #[test]
+    fn governance_tick_kills_a_real_owned_process_over_a_cost_cap() {
+        use crate::agents::claude::ClaudeAdapter;
+        use crate::agents::{Adapter, RunOpts, StreamParser};
+        use crate::config::OnTrip;
+        use std::time::{Duration, Instant};
+
+        // A throwaway adapter whose program is a long-running system command; it
+        // reuses the Claude parser (non-JSON output → harmless Output events).
+        struct SleeperAdapter;
+        impl Adapter for SleeperAdapter {
+            fn id(&self) -> &str {
+                "sleeper"
+            }
+            fn program(&self) -> &str {
+                if cfg!(windows) {
+                    "ping"
+                } else {
+                    "sh"
+                }
+            }
+            fn build_args(&self, _t: &str, _o: &RunOpts) -> Vec<String> {
+                Vec::new()
+            }
+            fn resume_args(&self, _s: &str, _t: &str, _o: &RunOpts) -> Vec<String> {
+                Vec::new()
+            }
+            fn new_parser(&self, run_id: &str) -> Box<dyn StreamParser> {
+                ClaudeAdapter::new().new_parser(run_id)
+            }
+        }
+
+        let state = test_state();
+        let run_id = new_run_id();
+        {
+            let store = state.store.lock().unwrap();
+            let mut run = Run::new(&run_id);
+            run.agent = "claude".into();
+            run.owned = true;
+            run.status = RunStatus::Running;
+            // Trip the cost cap immediately, and opt this run into kill-on-trip.
+            run.cost_usd = 1.0;
+            run.max_cost_usd = Some(0.5);
+            run.on_trip = Some(OnTrip::Kill);
+            store.upsert_run(&run).unwrap();
+        }
+
+        // Spawn the real long-running process under the supervisor (~30s sleeper).
+        let args: Vec<String> = if cfg!(windows) {
+            vec!["-n".into(), "30".into(), "127.0.0.1".into()]
+        } else {
+            vec!["-c".into(), "sleep 30".into()]
+        };
+        let handle = state
+            .supervisor
+            .spawn_raw(&SleeperAdapter, &run_id, &args, "", state.store.clone())
+            .expect("spawn sleeper");
+        assert!(handle.pid.is_some(), "need a pid to kill");
+        std::thread::sleep(Duration::from_millis(400)); // let it start
+
+        let mut gov = Governor::new();
+        governance_tick(&state, &mut gov);
+
+        // The tick should have flagged + killed it; wait for the terminal state.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let run = loop {
+            let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+            if run.status != RunStatus::Running || Instant::now() >= deadline {
+                break run;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            run.flags.contains(&"cap-cost".to_string()),
+            "expected cap-cost flag, got {:?}",
+            run.flags
+        );
+        assert_eq!(run.status, RunStatus::Killed, "the tick must kill the run");
     }
 
     #[tokio::test]
