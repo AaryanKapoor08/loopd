@@ -26,6 +26,11 @@ anyhow = "1"                                       # ergonomic error propagation
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 
+# The CLI/TUI are thin clients over the daemon's local HTTP API. reqwest's
+# blocking client keeps the CLI synchronous (it owns its own internal runtime),
+# and no TLS backend is pulled in — the API is localhost HTTP only.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+
 # --- persistence --------------------------------------------------------------
 # Single SQLite file in ~/.loopd, WAL mode. `bundled` compiles SQLite from
 # source so there is no system dependency to install (needs a C compiler at
