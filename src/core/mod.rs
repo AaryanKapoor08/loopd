@@ -5,9 +5,13 @@
 //! agents and surfaces are added as adapters that emit `LoopEvent`s — never as
 //! a parallel data model.
 //!
-//! Planned contents (Phase 1+):
+//! Contents:
 //! - `events`   — `LoopEvent`, `Run`, and their enums (`#[derive(Serialize, TS)]`).
-//! - `store`    — `rusqlite` (WAL) persistence; daemon-only writer.
 //! - `pricing`  — model→price map; cost fallback when an agent reports tokens only.
+//! - `store`    — `rusqlite` (WAL) persistence; daemon-only writer.
+//!
+//! Planned (later phases):
 //! - `detector` — governance: caps + runaway/no-progress detection (Phase 6).
 //! - `git`      — read-only `git diff` hashing for the no-progress signal (Phase 6).
+
+pub mod events;
