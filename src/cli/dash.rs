@@ -1,8 +1,8 @@
-//! `loop dash` — the live TUI cockpit. Stub until Phase 5 (ratatui).
+//! `loop dash` — the live TUI cockpit. A thin client: it just launches the
+//! `dashboard` module, which polls the daemon over HTTP and renders.
 
 use anyhow::Result;
 
 pub fn dash() -> Result<()> {
-    println!("loop dash: the live TUI cockpit lands in Phase 5. For now use `loop ps`.");
-    Ok(())
+    crate::dashboard::run()
 }
