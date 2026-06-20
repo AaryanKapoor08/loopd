@@ -9,6 +9,26 @@
 //! `clap` and print help. Subcommands are declared so `--help` documents where
 //! the tool is going, but their handlers are stubs until their phase lands.
 
+// Module skeleton — each is documented in its own `mod.rs`/file and filled in
+// during the phase noted there. `#[allow(dead_code)]` keeps the scaffold quiet
+// until the modules actually expose items (removed as each phase lands).
+#[allow(dead_code)]
+mod agents;
+#[allow(dead_code)]
+mod cli;
+#[allow(dead_code)]
+mod config;
+#[allow(dead_code)]
+mod core;
+#[allow(dead_code)]
+mod daemon;
+#[allow(dead_code)]
+mod dashboard;
+#[allow(dead_code)]
+mod observer;
+#[allow(dead_code)]
+mod supervisor;
+
 use clap::{CommandFactory, Parser, Subcommand};
 
 /// Top-level CLI: `loopd <command>`.
