@@ -60,8 +60,11 @@ pub fn price_of(model: &str) -> Option<ModelPrice> {
 
     // --- Codex / OpenAI (best-effort — VERIFY before relying on for caps) -----
     // Codex reports tokens only, so we need *some* number to compute a cost. The
-    // exact model id Codex emits can vary by version; treat these as estimates.
+    // `exec --json` stream carries no model id, so the Codex adapter stamps its
+    // default (`gpt-5-codex`), which matches the `gpt-5` fragment below. The exact
+    // model id Codex emits can vary by version; treat these as estimates.
     if m.contains("gpt-5") || m.contains("o4") || m.contains("o3") {
+        // gpt-5 / gpt-5-codex: $1.25/MTok input, $10/MTok output.
         return Some(ModelPrice::new(1.25, 10.00));
     }
     if m.contains("gpt-4o-mini") {
@@ -164,6 +167,23 @@ mod tests {
         );
         assert_eq!(price_of("claude-sonnet-4-6"), Some(ModelPrice::new(3.00, 15.00)));
         assert_eq!(price_of("claude-fable-5"), Some(ModelPrice::new(10.00, 50.00)));
+    }
+
+    #[test]
+    fn codex_default_model_resolves_and_computes_cost() {
+        // The Codex adapter stamps `gpt-5-codex` (the stream carries no model);
+        // it must resolve so the Phase-8 gate "cost computed from tokens, not
+        // blank" holds. A real captured Codex usage block → non-zero cost.
+        assert_eq!(price_of("gpt-5-codex"), Some(ModelPrice::new(1.25, 10.00)));
+        let usage = Usage {
+            input_tokens: 75_389 - 39_168, // fresh = total - cached subset
+            cache_read_input_tokens: 39_168,
+            output_tokens: 109 + 57, // output + reasoning
+            ..Usage::default()
+        };
+        assert_eq!(usage.total_input(), 75_389); // re-sums to the wire total
+        let cost = cost_of_usage("gpt-5-codex", &usage).expect("Codex cost must compute");
+        assert!(cost > 0.0, "Codex cost must not be blank: {cost}");
     }
 
     #[test]

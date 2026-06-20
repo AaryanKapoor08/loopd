@@ -27,6 +27,7 @@
 //!   Phase-4 concern and intentionally not here yet.
 
 pub mod claude;
+pub mod codex;
 
 use std::path::{Path, PathBuf};
 
@@ -234,11 +235,13 @@ pub trait StreamParser: Send {
     fn run_state(&self) -> RunState;
 }
 
-/// Resolve an adapter by id. The full config-driven registry is Phase 8; for now
-/// only `claude` is wired.
+/// Resolve an adapter by id. v1 hard-wires the two known adapters; config may
+/// override each agent's `cmd` (the registry, not the parser). Adding a vendor =
+/// one new `impl Adapter` + a match arm here.
 pub fn adapter_for(id: &str) -> Option<Box<dyn Adapter>> {
     match id {
         "claude" => Some(Box::new(claude::ClaudeAdapter::new())),
+        "codex" => Some(Box::new(codex::CodexAdapter::new())),
         _ => None,
     }
 }
