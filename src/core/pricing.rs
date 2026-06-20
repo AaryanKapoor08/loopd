@@ -74,14 +74,76 @@ pub fn price_of(model: &str) -> Option<ModelPrice> {
     None
 }
 
-/// Compute the cost in USD for `tokens_in`/`tokens_out` on `model`, or `None`
-/// if the model is unknown. This is the **fallback** path — when an agent
-/// reports a cost directly, store that instead of calling this.
-pub fn cost_of(model: &str, tokens_in: u32, tokens_out: u32) -> Option<f64> {
+/// Cache-token price multipliers, relative to the base input rate (Anthropic
+/// pricing reference). A cache *write* (`cache_creation_input_tokens`) costs
+/// ~1.25× input at the 5-minute TTL (2× at 1h — we assume the 5m default, which
+/// is what CC/transcript usage reports for the bare field); a cache *read*
+/// (`cache_read_input_tokens`) costs ~0.10× input. Counting cache tokens at the
+/// full input rate would over-bill; ignoring them undercounts badly.
+const CACHE_WRITE_MULT: f64 = 1.25;
+const CACHE_READ_MULT: f64 = 0.10;
+
+/// A token-usage block as an agent reports it (CC `message.usage`, the Mode-B
+/// transcript, the SDK). Cache tokens are reported in **separate buckets** on
+/// the wire; capturing them here is what lets totals and cost include them — a
+/// long cached session is mostly cache reads, so summing only `input_tokens`
+/// undercounts both (vibe-kanban `claude.rs`; ARCHITECTURE.md §4). The Phase-3
+/// parser builds one of these per turn, stores [`Usage::total_input`] in
+/// `Run.tokens_in`, and (when the adapter doesn't self-report cost) prices it
+/// via [`cost_of_usage`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    /// Fresh (uncached) input tokens.
+    pub input_tokens: u32,
+    /// Tokens written to the prompt cache this turn (~1.25× input price).
+    pub cache_creation_input_tokens: u32,
+    /// Tokens served from the prompt cache this turn (~0.10× input price).
+    pub cache_read_input_tokens: u32,
+    /// Output tokens generated this turn.
+    pub output_tokens: u32,
+}
+
+impl Usage {
+    /// Effective input tokens = fresh input + cache writes + cache reads. This
+    /// is the number that flows to `Run.tokens_in` and the cost cap; counting
+    /// only `input_tokens` undercounts because cache reads dominate long runs.
+    pub fn total_input(&self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+}
+
+/// Compute the fallback cost in USD for a full [`Usage`] block on `model`, or
+/// `None` if the model is unknown. Cache tokens are priced at their real
+/// multipliers (write 1.25×, read 0.10× of the input rate) rather than lumped
+/// in at full input price. This is the **fallback** path — when an agent reports
+/// a cost directly (CC `total_cost_usd`), store that instead of calling this.
+pub fn cost_of_usage(model: &str, usage: &Usage) -> Option<f64> {
     let price = price_of(model)?;
-    let input = (tokens_in as f64 / 1_000_000.0) * price.input_per_mtok;
-    let output = (tokens_out as f64 / 1_000_000.0) * price.output_per_mtok;
-    Some(input + output)
+    const MTOK: f64 = 1_000_000.0;
+    let input = (usage.input_tokens as f64 / MTOK) * price.input_per_mtok;
+    let cache_write =
+        (usage.cache_creation_input_tokens as f64 / MTOK) * price.input_per_mtok * CACHE_WRITE_MULT;
+    let cache_read =
+        (usage.cache_read_input_tokens as f64 / MTOK) * price.input_per_mtok * CACHE_READ_MULT;
+    let output = (usage.output_tokens as f64 / MTOK) * price.output_per_mtok;
+    Some(input + cache_write + cache_read + output)
+}
+
+/// Compute the cost in USD for plain `tokens_in`/`tokens_out` on `model`, or
+/// `None` if the model is unknown. Thin wrapper over [`cost_of_usage`] with
+/// empty cache buckets — for callers (e.g. Codex `turn.completed`) that report a
+/// single input count with no cache breakdown. One cost path, no drift.
+pub fn cost_of(model: &str, tokens_in: u32, tokens_out: u32) -> Option<f64> {
+    cost_of_usage(
+        model,
+        &Usage {
+            input_tokens: tokens_in,
+            output_tokens: tokens_out,
+            ..Usage::default()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -119,5 +181,36 @@ mod tests {
         // 500k in + 100k out on Haiku = $0.50 + $0.50 = $1.00.
         let cost = cost_of("claude-haiku-4-5", 500_000, 100_000).unwrap();
         assert!((cost - 1.0).abs() < 1e-9, "got {cost}");
+    }
+
+    #[test]
+    fn usage_total_and_cost_include_cache_tokens() {
+        // A cache-heavy turn: most of the input is served from cache, as in a
+        // long session. Counting only `input_tokens` would miss ~99% of it.
+        let usage = Usage {
+            input_tokens: 1_000,
+            cache_creation_input_tokens: 10_000,
+            cache_read_input_tokens: 100_000,
+            output_tokens: 500,
+        };
+
+        // The displayed total must count every input bucket, not just fresh input.
+        assert_eq!(usage.total_input(), 111_000);
+
+        // Opus: $5/MTok in, $25/MTok out; cache write 1.25×, cache read 0.10×.
+        //   input       1_000/1e6 * 5            = 0.005
+        //   cache_write 10_000/1e6 * 5 * 1.25    = 0.0625
+        //   cache_read  100_000/1e6 * 5 * 0.10   = 0.05
+        //   output      500/1e6 * 25             = 0.0125
+        //   total                                 = 0.13
+        let cost = cost_of_usage("claude-opus-4-8", &usage).unwrap();
+        assert!((cost - 0.13).abs() < 1e-9, "got {cost}");
+
+        // The bug this guards against: pricing only `input_tokens` undercounts.
+        let naive = cost_of("claude-opus-4-8", usage.input_tokens, usage.output_tokens).unwrap();
+        assert!(naive < cost, "cache tokens must raise the bill: naive {naive} vs {cost}");
+
+        // Unknown models stay unpriced through the usage path too.
+        assert_eq!(cost_of_usage("totally-made-up", &usage), None);
     }
 }

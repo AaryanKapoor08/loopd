@@ -69,6 +69,8 @@ impl Store {
                 cost_usd         REAL NOT NULL DEFAULT 0,
                 tokens_in        INTEGER NOT NULL DEFAULT 0,
                 tokens_out       INTEGER NOT NULL DEFAULT 0,
+                context_tokens   INTEGER NOT NULL DEFAULT 0,
+                context_window   INTEGER NOT NULL DEFAULT 200000,
                 exit_code        INTEGER,
                 run_reason       TEXT NOT NULL,
                 parent_run_id    TEXT,
@@ -102,6 +104,33 @@ impl Store {
             ",
             )
             .context("creating schema")?;
+        // Additive migrations for stores created before a field existed.
+        // `CREATE TABLE IF NOT EXISTS` leaves an existing `runs` table untouched,
+        // so new columns must be added explicitly. The model has no production
+        // data; these are pure additions with safe defaults.
+        self.add_column_if_missing("runs", "context_tokens", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("runs", "context_window", "INTEGER NOT NULL DEFAULT 200000")?;
+        Ok(())
+    }
+
+    /// Add `column` to `table` if it isn't already present (idempotent). Used for
+    /// additive schema migrations on stores that predate a field. `table`/`column`
+    /// are internal constants, never user input.
+    fn add_column_if_missing(&self, table: &str, column: &str, decl: &str) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("reading schema of {table}"))?;
+        let present = stmt
+            .query_map([], |row| row.get::<_, String>("name"))
+            .context("listing columns")?
+            .filter_map(|r| r.ok())
+            .any(|name| name == column);
+        if !present {
+            self.conn
+                .execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])
+                .with_context(|| format!("adding column {table}.{column}"))?;
+        }
         Ok(())
     }
 
@@ -140,18 +169,21 @@ impl Store {
             .execute(
                 "INSERT INTO runs
                  (run_id, label, agent, cwd, status, prompt, pid, agent_session_id,
-                  model, iteration, cost_usd, tokens_in, tokens_out, exit_code,
-                  run_reason, parent_run_id, branch, worktree_path, started_at,
-                  ended_at, last_event_at, updated_at, flags, kill_requested, owned)
+                  model, iteration, cost_usd, tokens_in, tokens_out, context_tokens,
+                  context_window, exit_code, run_reason, parent_run_id, branch,
+                  worktree_path, started_at, ended_at, last_event_at, updated_at,
+                  flags, kill_requested, owned)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                         ?25, ?26, ?27)
                  ON CONFLICT(run_id) DO UPDATE SET
                    label=?2, agent=?3, cwd=?4, status=?5, prompt=?6, pid=?7,
                    agent_session_id=?8, model=?9, iteration=?10, cost_usd=?11,
-                   tokens_in=?12, tokens_out=?13, exit_code=?14, run_reason=?15,
-                   parent_run_id=?16, branch=?17, worktree_path=?18, started_at=?19,
-                   ended_at=?20, last_event_at=?21, updated_at=?22, flags=?23,
-                   kill_requested=?24, owned=?25",
+                   tokens_in=?12, tokens_out=?13, context_tokens=?14,
+                   context_window=?15, exit_code=?16, run_reason=?17,
+                   parent_run_id=?18, branch=?19, worktree_path=?20, started_at=?21,
+                   ended_at=?22, last_event_at=?23, updated_at=?24, flags=?25,
+                   kill_requested=?26, owned=?27",
                 params![
                     r.run_id,
                     r.label,
@@ -166,6 +198,8 @@ impl Store {
                     r.cost_usd,
                     r.tokens_in as i64,
                     r.tokens_out as i64,
+                    r.context_tokens as i64,
+                    r.context_window as i64,
                     r.exit_code,
                     enum_to_text(&r.run_reason)?,
                     r.parent_run_id,
@@ -277,6 +311,8 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         cost_usd: row.get("cost_usd")?,
         tokens_in: row.get::<_, i64>("tokens_in")? as u32,
         tokens_out: row.get::<_, i64>("tokens_out")? as u32,
+        context_tokens: row.get::<_, i64>("context_tokens")? as u32,
+        context_window: row.get::<_, i64>("context_window")? as u32,
         exit_code: row.get("exit_code")?,
         run_reason: text_to_enum(&row.get::<_, String>("run_reason")?)?,
         parent_run_id: row.get("parent_run_id")?,
@@ -334,6 +370,9 @@ mod tests {
         run.model = Some("claude-opus-4-8".to_string());
         run.flags = vec!["repeated-action".to_string()];
         run.owned = true;
+        run.tokens_in = 111_000;
+        run.context_tokens = 45_000;
+        run.context_window = 1_000_000;
         store.upsert_run(&run).expect("upsert run");
 
         for i in 0..3u32 {
@@ -351,6 +390,10 @@ mod tests {
         assert_eq!(got.status, RunStatus::Running);
         assert_eq!(got.flags, vec!["repeated-action".to_string()]);
         assert!(got.owned);
+        // Token + context fields survive the round-trip.
+        assert_eq!(got.tokens_in, 111_000);
+        assert_eq!(got.context_tokens, 45_000);
+        assert_eq!(got.context_window, 1_000_000);
 
         let events = store.events_for_run(&run_id, 100).expect("events");
         assert_eq!(events.len(), 3);

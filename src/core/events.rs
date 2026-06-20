@@ -21,6 +21,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Default context-window size, used until the adapter discovers the real one.
+/// Conservative: current Claude models are mostly 1M (Haiku 4.5 is 200k), but
+/// the authoritative figure arrives in `result.modelUsage[model]` at `RunEnd`,
+/// so this only matters mid-run. See `context_window_for`.
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 200_000;
+/// Context-window size for models running the 1M-token beta (their id carries
+/// a `[1m]` marker, e.g. `claude-opus-4-8[1m]`).
+pub const LARGE_CONTEXT_WINDOW: u32 = 1_000_000;
+
+/// Best-effort context window for a model id, before the exact figure arrives in
+/// `result.modelUsage` at `RunEnd`. `1_000_000` when the id carries the `[1m]`
+/// marker, else [`DEFAULT_CONTEXT_WINDOW`].
+pub fn context_window_for(model: &str) -> u32 {
+    if model.contains("[1m]") {
+        LARGE_CONTEXT_WINDOW
+    } else {
+        DEFAULT_CONTEXT_WINDOW
+    }
+}
+
+// TODO(phase-3): cost precedence is currently resolved by `pricing.rs` as a
+// fallback. Phase 3's `Adapter` should expose a static `reports_cost()`
+// capability (CC=true via `total_cost_usd`, Codex=false) so the supervisor picks
+// agent-reported vs computed cost by lookup, not a branch in the parser
+// (vibe-kanban `BaseAgentCapability`). Reserved here; no behavior change yet.
+
 /// Which ingestion surface produced an event. Lets the detector and dedup logic
 /// reason about provenance (e.g. transcript is canonical for tokens; hooks are
 /// low-latency liveness — see `ARCHITECTURE.md §4`).
@@ -200,10 +226,21 @@ pub struct Run {
     pub iteration: u32,
     /// Resolved cumulative cost in USD (agent-reported or computed).
     pub cost_usd: f64,
-    /// Cumulative input tokens.
+    /// Cumulative input tokens — the **summed** total (fresh + cache-creation +
+    /// cache-read), not just fresh input. See `core::pricing::Usage::total_input`.
     pub tokens_in: u32,
     /// Cumulative output tokens.
     pub tokens_out: u32,
+    /// Tokens currently occupying the model's context window. An estimate while
+    /// the run is live; corrected to the exact figure from `result.modelUsage`
+    /// at `RunEnd`. Powers the Phase-5 "context %" column and Phase-6
+    /// context-exhaustion flag. Populated from Phase 3 onward.
+    pub context_tokens: u32,
+    /// The model's context window size. Default `200_000`; `1_000_000` when the
+    /// model id carries the `[1m]` marker. A placeholder until `RunEnd`, when the
+    /// authoritative window arrives in `result.modelUsage[model]` — don't assert
+    /// on it mid-run (ARCHITECTURE.md §9; vibe-kanban `claude.rs`).
+    pub context_window: u32,
     /// Process exit code, when known.
     pub exit_code: Option<i32>,
     /// Why this run exists.
@@ -251,6 +288,9 @@ impl Run {
             cost_usd: 0.0,
             tokens_in: 0,
             tokens_out: 0,
+            context_tokens: 0,
+            // Conservative default until the adapter learns the real window.
+            context_window: DEFAULT_CONTEXT_WINDOW,
             exit_code: None,
             run_reason: RunReason::UserRun,
             parent_run_id: None,

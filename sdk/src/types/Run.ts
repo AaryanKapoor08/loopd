@@ -53,13 +53,28 @@ iteration: number,
  */
 costUsd: number, 
 /**
- * Cumulative input tokens.
+ * Cumulative input tokens — the **summed** total (fresh + cache-creation +
+ * cache-read), not just fresh input. See `core::pricing::Usage::total_input`.
  */
 tokensIn: number, 
 /**
  * Cumulative output tokens.
  */
 tokensOut: number, 
+/**
+ * Tokens currently occupying the model's context window. An estimate while
+ * the run is live; corrected to the exact figure from `result.modelUsage`
+ * at `RunEnd`. Powers the Phase-5 "context %" column and Phase-6
+ * context-exhaustion flag. Populated from Phase 3 onward.
+ */
+contextTokens: number, 
+/**
+ * The model's context window size. Default `200_000`; `1_000_000` when the
+ * model id carries the `[1m]` marker. A placeholder until `RunEnd`, when the
+ * authoritative window arrives in `result.modelUsage[model]` — don't assert
+ * on it mid-run (ARCHITECTURE.md §9; vibe-kanban `claude.rs`).
+ */
+contextWindow: number, 
 /**
  * Process exit code, when known.
  */
