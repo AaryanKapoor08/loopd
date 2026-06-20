@@ -23,16 +23,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::agents::{adapter_for, RunOpts};
 use crate::config::Config;
-use crate::core::events::{LoopEvent, Run};
+use crate::core::events::{new_run_id, now_ms, LoopEvent, Run, RunReason, RunStatus};
 use crate::core::store::Store;
-
-/// Placeholder for the Phase-3 supervisor registry (which will track owned PTY
-/// processes by run id). Empty in Phase 2: the daemon already owns the `Store`
-/// and `Config`, so the HTTP surface and lifecycle can be built and tested
-/// before process supervision exists.
-#[derive(Default)]
-pub struct SupervisorRegistry {}
+use crate::supervisor::SupervisorRegistry;
 
 /// Shared state handed to every route. `Clone` is cheap — everything is behind
 /// an `Arc`. The `Store` is additionally wrapped in a `Mutex` because a
@@ -177,33 +172,153 @@ async fn events_for_run(
     Ok(Json(events))
 }
 
-/// Spawn a run — needs the Phase-3 supervisor. Stub until then.
-async fn create_run() -> ApiError {
-    ApiError::NotImplemented("spawning runs lands in Phase 3 (supervisor)")
+/// Body of `POST /runs`. camelCase to match the wire/SDK convention.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRunReq {
+    /// The task text the agent runs.
+    prompt: String,
+    /// Adapter id; defaults to `claude`.
+    #[serde(default)]
+    agent: Option<String>,
+    /// Working directory to spawn in (the agent edits here, never loopd).
+    #[serde(default)]
+    cwd: Option<String>,
+    /// Human-readable label; defaults to the run id.
+    #[serde(default)]
+    label: Option<String>,
+    /// Optional model override.
+    #[serde(default)]
+    model: Option<String>,
 }
 
-/// Request a kill. Flags the run via the store; the Phase-3 supervisor acts on
-/// the flag for owned runs. Works today because `request_kill` exists in Phase 1.
+/// Spawn an owned (Mode-A) run: insert the row, then hand it to the supervisor,
+/// which spawns the agent through a PTY and streams events back into the store.
+async fn create_run(
+    State(state): State<AppState>,
+    Json(req): Json<CreateRunReq>,
+) -> Result<(StatusCode, Json<Run>), ApiError> {
+    let agent = req.agent.unwrap_or_else(|| "claude".to_string());
+    let adapter = adapter_for(&agent)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown agent `{agent}`")))?;
+
+    let run_id = new_run_id();
+    let cwd = req.cwd.unwrap_or_default();
+    let mut run = Run::new(&run_id);
+    run.agent = agent;
+    run.label = req.label.unwrap_or_else(|| run_id.clone());
+    run.prompt = req.prompt.clone();
+    run.cwd = cwd.clone();
+    run.owned = true;
+    run.run_reason = RunReason::UserRun;
+    run.status = RunStatus::Running;
+    state.store()?.upsert_run(&run).map_err(ApiError::Internal)?;
+
+    let opts = RunOpts { model: req.model };
+    state
+        .supervisor
+        .spawn(
+            adapter.as_ref(),
+            &run_id,
+            &req.prompt,
+            &cwd,
+            &opts,
+            state.store.clone(),
+        )
+        .map_err(ApiError::Internal)?;
+
+    // Re-read so the response reflects the pid the supervisor just recorded.
+    let run = state
+        .store()?
+        .get_run(&run_id)
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::Internal(anyhow!("run {run_id} vanished after spawn")))?;
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
+/// Request a kill. Flags the run via the store (the detector/clients see it) and,
+/// for owned runs, tells the supervisor to take down the process tree. Observed
+/// (unowned) runs only get the flag — loopd has no process to stop.
 async fn kill_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let store = state.store()?;
-    if store.get_run(&id).map_err(ApiError::Internal)?.is_none() {
-        return Err(ApiError::NotFound(format!("run {id}")));
+    {
+        let store = state.store()?;
+        if store.get_run(&id).map_err(ApiError::Internal)?.is_none() {
+            return Err(ApiError::NotFound(format!("run {id}")));
+        }
+        store.request_kill(&id).map_err(ApiError::Internal)?;
     }
-    store.request_kill(&id).map_err(ApiError::Internal)?;
+    state.supervisor.kill(&id); // no-op for unowned/finished runs
     Ok(StatusCode::ACCEPTED)
 }
 
-/// Pause a run — checkpoint + stop via the supervisor (Phase 3/6). Stub.
-async fn pause_run() -> ApiError {
-    ApiError::NotImplemented("pause lands in Phase 3/6 (supervisor checkpoint+stop)")
+/// Pause an owned run: capture its agent session id and stop the process
+/// (ARCHITECTURE §4 — no ConPTY suspend). The run becomes `Paused` and is
+/// resumable. Only owned, currently-supervised runs can be paused.
+async fn pause_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.store()?.get_run(&id).map_err(ApiError::Internal)?.is_none() {
+        return Err(ApiError::NotFound(format!("run {id}")));
+    }
+    if !state.supervisor.owns(&id) {
+        return Err(ApiError::BadRequest(format!(
+            "run {id} is not an owned, running process — cannot pause"
+        )));
+    }
+    state.supervisor.pause(&id);
+    Ok(StatusCode::ACCEPTED)
 }
 
-/// Resume a run — re-spawn via the agent's native resume (Phase 3/6). Stub.
-async fn resume_run() -> ApiError {
-    ApiError::NotImplemented("resume lands in Phase 3/6 (supervisor re-spawn)")
+/// Resume a paused run by re-spawning the agent with its native `--resume`
+/// (the parser drops the replayed history). Needs the captured agent session id.
+async fn resume_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let run = state
+        .store()?
+        .get_run(&id)
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("run {id}")))?;
+    if run.status != RunStatus::Paused {
+        return Err(ApiError::BadRequest(format!(
+            "run {id} is {:?}, only paused runs can be resumed",
+            run.status
+        )));
+    }
+    let session_id = run.agent_session_id.clone().ok_or_else(|| {
+        ApiError::BadRequest(format!("run {id} has no agent session id to resume"))
+    })?;
+    let adapter = adapter_for(&run.agent)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown agent `{}`", run.agent)))?;
+
+    // Flip the row back to Running before re-spawning.
+    let mut resumed = run.clone();
+    resumed.status = RunStatus::Running;
+    resumed.ended_at = None;
+    resumed.updated_at = now_ms();
+    state.store()?.upsert_run(&resumed).map_err(ApiError::Internal)?;
+
+    let opts = RunOpts {
+        model: run.model.clone(),
+    };
+    state
+        .supervisor
+        .resume(
+            adapter.as_ref(),
+            &id,
+            &session_id,
+            &run.prompt,
+            &run.cwd,
+            &opts,
+            state.store.clone(),
+        )
+        .map_err(ApiError::Internal)?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Mode-B ingest (CC hooks / SDK). Stub until the observer lands.
@@ -217,6 +332,7 @@ async fn ingest() -> ApiError {
 /// clients can branch on the status and surface the message.
 enum ApiError {
     NotFound(String),
+    BadRequest(String),
     NotImplemented(&'static str),
     Internal(anyhow::Error),
 }
@@ -225,6 +341,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound(what) => (StatusCode::NOT_FOUND, format!("{what} not found")),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg.to_string()),
             ApiError::Internal(err) => {
                 tracing::error!("internal error: {err:#}");
@@ -332,19 +449,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unimplemented_routes_return_501() {
-        for (method, uri) in [("POST", "/runs"), ("POST", "/ingest"), ("POST", "/runs/x/pause")] {
-            let resp = app(test_state())
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {uri}");
-        }
+    async fn ingest_still_returns_501() {
+        // /ingest (Mode B / SDK) is the only stub left after Phase 3.
+        let resp = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ingest")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn create_run_with_unknown_agent_is_400() {
+        // Validates the wiring without spawning a real agent.
+        let body = serde_json::json!({ "prompt": "hi", "agent": "definitely-not-an-agent" });
+        let resp = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn pause_unknown_run_is_404() {
+        let resp = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/runs/nope/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
