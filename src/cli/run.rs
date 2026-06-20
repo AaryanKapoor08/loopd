@@ -12,7 +12,7 @@ use clap::Args;
 
 use crate::agents::adapter_for;
 use crate::config::Config;
-use crate::daemon::client::DaemonClient;
+use crate::daemon::client::{DaemonClient, NewRun};
 
 /// Arguments for `loop run`.
 #[derive(Args, Debug)]
@@ -78,31 +78,56 @@ pub fn run(args: RunArgs) -> Result<()> {
     };
     let cwd = cwd.to_string_lossy().to_string();
 
+    // Validate --on-trip up front so a typo is a clean message, not a 400 body.
+    if let Some(t) = args.on_trip.as_deref() {
+        if !matches!(t, "warn" | "notify" | "pause" | "kill") {
+            return Err(anyhow!(
+                "invalid --on-trip `{t}` — expected one of: warn, notify, pause, kill"
+            ));
+        }
+    }
+
     let client = DaemonClient::from_config(&config);
     client.ensure_running(&config)?;
 
-    let run = client.create_run(
-        &args.task,
-        Some(&agent),
-        Some(&cwd),
-        args.label.as_deref(),
-        args.model.as_deref(),
-    )?;
+    let run = client.create_run(&NewRun {
+        prompt: &args.task,
+        agent: Some(&agent),
+        cwd: Some(&cwd),
+        label: args.label.as_deref(),
+        model: args.model.as_deref(),
+        max_iterations: args.max_iterations,
+        max_cost_usd: args.max_cost,
+        max_duration_min: args.max_duration,
+        on_trip: args.on_trip.as_deref(),
+        ..Default::default()
+    })?;
 
     println!("started run {} ({})", run.run_id, run.agent);
     println!("  watch it:  loop dash      tail logs:  loop logs {} --follow", run.run_id);
 
-    // Per-run caps land with the governance engine (Phase 6). Be honest that the
-    // flags are accepted but not yet enforced rather than silently dropping them.
+    // Per-run caps are now enforced by the governance engine (Phase 6). Echo the
+    // active overrides so the user can see what loopd will hold this run to.
     if args.max_cost.is_some()
         || args.max_iterations.is_some()
         || args.max_duration.is_some()
         || args.on_trip.is_some()
     {
-        println!(
-            "note: per-run caps (--max-cost/--max-iterations/--max-duration/--on-trip) \
-             are recorded but not enforced until the governance engine lands (Phase 6)."
-        );
+        let mut parts = Vec::new();
+        if let Some(v) = args.max_iterations {
+            parts.push(format!("iter ≤ {v}"));
+        }
+        if let Some(v) = args.max_cost {
+            parts.push(format!("cost ≤ ${v:.2}"));
+        }
+        if let Some(v) = args.max_duration {
+            parts.push(format!("dur ≤ {v}m"));
+        }
+        let on_trip = args
+            .on_trip
+            .clone()
+            .unwrap_or_else(|| config.defaults.on_trip.word().to_string());
+        println!("  caps: {} (on-trip: {on_trip})", parts.join(", "));
     }
 
     Ok(())

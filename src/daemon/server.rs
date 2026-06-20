@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::{adapter_for, RunOpts};
-use crate::config::Config;
+use crate::config::{Config, OnTrip};
 use crate::core::events::{new_run_id, now_ms, LoopEvent, Run, RunReason, RunStatus};
 use crate::core::store::Store;
 use crate::supervisor::SupervisorRegistry;
@@ -190,6 +190,25 @@ struct CreateRunReq {
     /// Optional model override.
     #[serde(default)]
     model: Option<String>,
+    /// Per-run cap override: max iterations (else config default).
+    #[serde(default)]
+    max_iterations: Option<u32>,
+    /// Per-run cap override: max cumulative cost in USD (else config default).
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+    /// Per-run cap override: max wall-clock minutes (else config default).
+    #[serde(default)]
+    max_duration_min: Option<u32>,
+    /// Per-run on-trip override (`warn`/`notify`/`pause`/`kill`; else config default).
+    #[serde(default)]
+    on_trip: Option<OnTrip>,
+    /// Why this run exists; defaults to a user-initiated run. `Retry` carries
+    /// lineage via `parent_run_id` (ARCHITECTURE §3).
+    #[serde(default)]
+    run_reason: Option<RunReason>,
+    /// The run this one derives from (set on a `Retry`).
+    #[serde(default)]
+    parent_run_id: Option<String>,
 }
 
 /// Spawn an owned (Mode-A) run: insert the row, then hand it to the supervisor,
@@ -210,7 +229,12 @@ async fn create_run(
     run.prompt = req.prompt.clone();
     run.cwd = cwd.clone();
     run.owned = true;
-    run.run_reason = RunReason::UserRun;
+    run.run_reason = req.run_reason.unwrap_or(RunReason::UserRun);
+    run.parent_run_id = req.parent_run_id;
+    run.max_iterations = req.max_iterations;
+    run.max_cost_usd = req.max_cost_usd;
+    run.max_duration_min = req.max_duration_min;
+    run.on_trip = req.on_trip;
     run.status = RunStatus::Running;
     state.store()?.upsert_run(&run).map_err(ApiError::Internal)?;
 

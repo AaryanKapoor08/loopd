@@ -285,8 +285,9 @@ impl App {
         };
     }
 
-    /// Retry the targeted owned run as a fresh run with the same prompt/agent/cwd
-    /// (v1 simple re-run — proper Retry lineage lands with governance, Phase 6).
+    /// Retry the targeted owned run as a fresh run with the same prompt/agent/cwd,
+    /// carrying proper lineage (`runReason=retry`, `parentRunId=<original>`,
+    /// ARCHITECTURE §3) plus the original's per-run cap overrides.
     fn retry(&mut self, client: &DaemonClient) {
         let Some((id, owned, _, run)) = self.target() else {
             return;
@@ -295,13 +296,19 @@ impl App {
             self.status = "observed run — read-only (cannot retry)".into();
             return;
         }
-        self.status = match client.create_run(
-            &run.prompt,
-            Some(&run.agent),
-            Some(&run.cwd),
-            None,
-            run.model.as_deref(),
-        ) {
+        self.status = match client.create_run(&crate::daemon::client::NewRun {
+            prompt: &run.prompt,
+            agent: Some(&run.agent),
+            cwd: Some(&run.cwd),
+            model: run.model.as_deref(),
+            max_iterations: run.max_iterations,
+            max_cost_usd: run.max_cost_usd,
+            max_duration_min: run.max_duration_min,
+            on_trip: run.on_trip.map(|t| t.word()),
+            run_reason: Some("retry"),
+            parent_run_id: Some(&id),
+            ..Default::default()
+        }) {
             Ok(new) => format!("retried {id} → new run {}", new.run_id),
             Err(e) => format!("retry failed: {e}"),
         };

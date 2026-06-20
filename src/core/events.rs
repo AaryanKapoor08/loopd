@@ -21,6 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::config::OnTrip;
+
 /// Default context-window size, used until the adapter discovers the real one.
 /// Conservative: current Claude models are mostly 1M (Haiku 4.5 is 200k), but
 /// the authoritative figure arrives in `result.modelUsage[model]` at `RunEnd`,
@@ -247,6 +249,16 @@ pub struct Run {
     pub run_reason: RunReason,
     /// Sub-agent / retry lineage — the run this one derives from.
     pub parent_run_id: Option<String>,
+    /// Per-run cap override: max agent iterations. `None` falls back to
+    /// `config.defaults.caps.maxIterations` at detection time.
+    pub max_iterations: Option<u32>,
+    /// Per-run cap override: max cumulative cost in USD. `None` → config default.
+    pub max_cost_usd: Option<f64>,
+    /// Per-run cap override: max wall-clock minutes. `None` → config default.
+    pub max_duration_min: Option<u32>,
+    /// Per-run override for what happens when a cap/detector trips. `None` →
+    /// `config.defaults.onTrip`.
+    pub on_trip: Option<OnTrip>,
     /// Git branch (populated read-only from `gitBranch`).
     pub branch: Option<String>,
     /// Worktree path — reserved for v2 (worktree isolation is out of v1).
@@ -294,6 +306,10 @@ impl Run {
             exit_code: None,
             run_reason: RunReason::UserRun,
             parent_run_id: None,
+            max_iterations: None,
+            max_cost_usd: None,
+            max_duration_min: None,
+            on_trip: None,
             branch: None,
             worktree_path: None,
             started_at: now,

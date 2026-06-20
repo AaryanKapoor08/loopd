@@ -242,18 +242,26 @@ pub fn clamp_action(on_trip: OnTrip, owned: bool) -> Action {
     }
 }
 
-/// Effective cap thresholds for a run: config defaults for now; per-run overrides
-/// plug in once the wire model carries them (Phase 6, next commit).
-fn effective_caps(_run: &Run, config: &Config) -> Caps {
-    config.defaults.caps
+/// Effective cap thresholds for a run: each per-run override (from `loop run
+/// --max-*`) wins, falling back to `config.defaults.caps` field by field.
+fn effective_caps(run: &Run, config: &Config) -> Caps {
+    let d = config.defaults.caps;
+    Caps {
+        max_iterations: run.max_iterations.unwrap_or(d.max_iterations),
+        max_cost_usd: run.max_cost_usd.unwrap_or(d.max_cost_usd),
+        max_duration_min: run.max_duration_min.unwrap_or(d.max_duration_min),
+    }
 }
 
+/// Runaway thresholds are global (config-only) for v1 — no per-run override.
 fn effective_runaway(_run: &Run, config: &Config) -> Runaway {
     config.defaults.runaway
 }
 
-fn effective_on_trip(_run: &Run, config: &Config) -> OnTrip {
-    config.defaults.on_trip
+/// Effective on-trip action: the per-run override (`loop run --on-trip`) wins,
+/// else the config default.
+fn effective_on_trip(run: &Run, config: &Config) -> OnTrip {
+    run.on_trip.unwrap_or(config.defaults.on_trip)
 }
 
 /// Run the user's opt-in `test_command` in `cwd`. `Some(true)` = passed (exit 0),

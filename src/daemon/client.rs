@@ -23,6 +23,36 @@ pub struct DaemonClient {
     http: reqwest::blocking::Client,
 }
 
+/// The fields of a `POST /runs` request. Only `prompt` is required; the rest are
+/// optional overrides the daemon fills from config when unset. Sent as camelCase
+/// JSON (the wire convention). The on-trip/run-reason strings are the serde wire
+/// words (`warn`/`pause`/…, `user_run`/`retry`/…).
+#[derive(Default)]
+pub struct NewRun<'a> {
+    /// The task text the agent runs (required).
+    pub prompt: &'a str,
+    /// Adapter id (else config default agent).
+    pub agent: Option<&'a str>,
+    /// Working directory (else the daemon's cwd).
+    pub cwd: Option<&'a str>,
+    /// Human-readable label (else the run id).
+    pub label: Option<&'a str>,
+    /// Model override.
+    pub model: Option<&'a str>,
+    /// Per-run cap: max iterations.
+    pub max_iterations: Option<u32>,
+    /// Per-run cap: max cumulative cost in USD.
+    pub max_cost_usd: Option<f64>,
+    /// Per-run cap: max wall-clock minutes.
+    pub max_duration_min: Option<u32>,
+    /// Per-run on-trip override (wire word: `warn`/`notify`/`pause`/`kill`).
+    pub on_trip: Option<&'a str>,
+    /// Why the run exists (wire word: `user_run`/`retry`/…). Defaults to a user run.
+    pub run_reason: Option<&'a str>,
+    /// Lineage: the run this one derives from (set on a retry).
+    pub parent_run_id: Option<&'a str>,
+}
+
 impl DaemonClient {
     /// Bind to `http://127.0.0.1:<port>`.
     pub fn new(port: u16) -> Self {
@@ -95,30 +125,41 @@ impl DaemonClient {
     // --- typed API calls (used by the Phase-4 CLI) ---------------------------
 
     /// `POST /runs` — start an owned (Mode-A) run; returns the created `Run`
-    /// (with its id + pid). `None` fields are omitted from the body so the daemon
-    /// applies its own defaults (agent, label, cwd). A `400` (e.g. unknown agent)
-    /// surfaces as the daemon's message rather than a generic HTTP error.
-    pub fn create_run(
-        &self,
-        prompt: &str,
-        agent: Option<&str>,
-        cwd: Option<&str>,
-        label: Option<&str>,
-        model: Option<&str>,
-    ) -> Result<Run> {
+    /// (with its id + pid). Unset fields are omitted from the body so the daemon
+    /// applies its own defaults (agent, label, cwd, caps). A `400` (e.g. unknown
+    /// agent) surfaces as the daemon's message rather than a generic HTTP error.
+    pub fn create_run(&self, req: &NewRun) -> Result<Run> {
         let mut body = serde_json::Map::new();
-        body.insert("prompt".into(), prompt.into());
-        if let Some(a) = agent {
+        body.insert("prompt".into(), req.prompt.into());
+        if let Some(a) = req.agent {
             body.insert("agent".into(), a.into());
         }
-        if let Some(c) = cwd {
+        if let Some(c) = req.cwd {
             body.insert("cwd".into(), c.into());
         }
-        if let Some(l) = label {
+        if let Some(l) = req.label {
             body.insert("label".into(), l.into());
         }
-        if let Some(m) = model {
+        if let Some(m) = req.model {
             body.insert("model".into(), m.into());
+        }
+        if let Some(v) = req.max_iterations {
+            body.insert("maxIterations".into(), v.into());
+        }
+        if let Some(v) = req.max_cost_usd {
+            body.insert("maxCostUsd".into(), v.into());
+        }
+        if let Some(v) = req.max_duration_min {
+            body.insert("maxDurationMin".into(), v.into());
+        }
+        if let Some(t) = req.on_trip {
+            body.insert("onTrip".into(), t.into());
+        }
+        if let Some(r) = req.run_reason {
+            body.insert("runReason".into(), r.into());
+        }
+        if let Some(p) = req.parent_run_id {
+            body.insert("parentRunId".into(), p.into());
         }
 
         let resp = self

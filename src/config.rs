@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// The loopd data directory. `$LOOPD_DIR` wins when set (a custom data dir, and
 /// what tests use to isolate `~/.loopd` — note `dirs::home_dir()` ignores env on
@@ -112,8 +113,9 @@ impl Default for Defaults {
 }
 
 /// What loopd does when a cap or detector trips. Default `Warn` keeps governance
-/// flag-only until the user explicitly opts into pause/kill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// flag-only until the user explicitly opts into pause/kill. Carries a `TS`
+/// derive because it also rides on the wire as a per-run override on `Run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum OnTrip {
     /// Surface a warning, take no action.
@@ -124,6 +126,18 @@ pub enum OnTrip {
     Pause,
     /// Kill the run. Owned runs only.
     Kill,
+}
+
+impl OnTrip {
+    /// The lowercase wire word (`warn`/`notify`/`pause`/`kill`).
+    pub fn word(self) -> &'static str {
+        match self {
+            OnTrip::Warn => "warn",
+            OnTrip::Notify => "notify",
+            OnTrip::Pause => "pause",
+            OnTrip::Kill => "kill",
+        }
+    }
 }
 
 /// Cap thresholds. Defaults from PLAN Part 10.

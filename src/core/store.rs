@@ -74,6 +74,10 @@ impl Store {
                 exit_code        INTEGER,
                 run_reason       TEXT NOT NULL,
                 parent_run_id    TEXT,
+                max_iterations   INTEGER,
+                max_cost_usd     REAL,
+                max_duration_min INTEGER,
+                on_trip          TEXT,
                 branch           TEXT,
                 worktree_path    TEXT,
                 started_at       INTEGER NOT NULL,
@@ -110,6 +114,11 @@ impl Store {
         // data; these are pure additions with safe defaults.
         self.add_column_if_missing("runs", "context_tokens", "INTEGER NOT NULL DEFAULT 0")?;
         self.add_column_if_missing("runs", "context_window", "INTEGER NOT NULL DEFAULT 200000")?;
+        // Phase 6: per-run cap/on-trip overrides (nullable → config default).
+        self.add_column_if_missing("runs", "max_iterations", "INTEGER")?;
+        self.add_column_if_missing("runs", "max_cost_usd", "REAL")?;
+        self.add_column_if_missing("runs", "max_duration_min", "INTEGER")?;
+        self.add_column_if_missing("runs", "on_trip", "TEXT")?;
         Ok(())
     }
 
@@ -172,10 +181,11 @@ impl Store {
                   model, iteration, cost_usd, tokens_in, tokens_out, context_tokens,
                   context_window, exit_code, run_reason, parent_run_id, branch,
                   worktree_path, started_at, ended_at, last_event_at, updated_at,
-                  flags, kill_requested, owned)
+                  flags, kill_requested, owned,
+                  max_iterations, max_cost_usd, max_duration_min, on_trip)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                          ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
-                         ?25, ?26, ?27)
+                         ?25, ?26, ?27, ?28, ?29, ?30, ?31)
                  ON CONFLICT(run_id) DO UPDATE SET
                    label=?2, agent=?3, cwd=?4, status=?5, prompt=?6, pid=?7,
                    agent_session_id=?8, model=?9, iteration=?10, cost_usd=?11,
@@ -183,7 +193,8 @@ impl Store {
                    context_window=?15, exit_code=?16, run_reason=?17,
                    parent_run_id=?18, branch=?19, worktree_path=?20, started_at=?21,
                    ended_at=?22, last_event_at=?23, updated_at=?24, flags=?25,
-                   kill_requested=?26, owned=?27",
+                   kill_requested=?26, owned=?27, max_iterations=?28,
+                   max_cost_usd=?29, max_duration_min=?30, on_trip=?31",
                 params![
                     r.run_id,
                     r.label,
@@ -212,6 +223,10 @@ impl Store {
                     serde_json::to_string(&r.flags).context("serializing flags")?,
                     r.kill_requested as i64,
                     r.owned as i64,
+                    r.max_iterations.map(|v| v as i64),
+                    r.max_cost_usd,
+                    r.max_duration_min.map(|v| v as i64),
+                    r.on_trip.map(|t| enum_to_text(&t)).transpose()?,
                 ],
             )
             .context("upserting run")?;
@@ -316,6 +331,13 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         exit_code: row.get("exit_code")?,
         run_reason: text_to_enum(&row.get::<_, String>("run_reason")?)?,
         parent_run_id: row.get("parent_run_id")?,
+        max_iterations: row.get::<_, Option<i64>>("max_iterations")?.map(|v| v as u32),
+        max_cost_usd: row.get("max_cost_usd")?,
+        max_duration_min: row.get::<_, Option<i64>>("max_duration_min")?.map(|v| v as u32),
+        on_trip: match row.get::<_, Option<String>>("on_trip")? {
+            Some(s) => Some(text_to_enum(&s)?),
+            None => None,
+        },
         branch: row.get("branch")?,
         worktree_path: row.get("worktree_path")?,
         started_at: row.get("started_at")?,
