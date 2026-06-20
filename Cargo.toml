@@ -70,3 +70,9 @@ ts-rs = { version = "10", features = ["import-esm"] }
 # --- diagnostics --------------------------------------------------------------
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Exercise axum routes in-process (no socket) via `ServiceExt::oneshot`, and read
+# response bodies with `BodyExt::collect`.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

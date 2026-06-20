@@ -6,7 +6,11 @@
 //! they call this API. Keeping a single owner means one writer and one place
 //! the governance detector runs.
 //!
-//! Planned contents (Phase 2):
+//! Contents:
 //! - `server`    — `axum` routes (`/health`, `/runs`, `/runs/:id`, `/ingest`, ...).
+//!
+//! Planned (rest of Phase 2):
 //! - `lifecycle` — start detached, write `~/.loopd/daemon.pid` + log; stop; status.
 //! - `client`    — `DaemonClient` used by every CLI command; auto-starts the daemon.
+
+pub mod server;
