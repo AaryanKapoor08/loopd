@@ -66,7 +66,10 @@ pub fn run(args: RunArgs) -> Result<()> {
     // Preflight: resolve the adapter and confirm its binary is installed *before*
     // we ask the daemon to spawn — turns a missing `claude` into one clear line.
     let adapter = adapter_for(&agent).ok_or_else(|| {
-        anyhow!("unknown agent `{agent}` — known agents this build can run: claude")
+        anyhow!(
+            "unknown agent `{agent}` — known agents this build can run: {}",
+            crate::agents::KNOWN_AGENTS.join(", ")
+        )
     })?;
     adapter.preflight().map_err(|e| anyhow!("{e}"))?;
 

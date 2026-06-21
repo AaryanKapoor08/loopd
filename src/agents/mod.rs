@@ -235,6 +235,12 @@ pub trait StreamParser: Send {
     fn run_state(&self) -> RunState;
 }
 
+/// The agent ids this build can run, in display order. Single source of truth so
+/// the `loop run` "unknown agent" hint and `adapter_for` can never drift apart
+/// (a test asserts every id here resolves). Adding a vendor = one new
+/// `impl Adapter`, a match arm in [`adapter_for`], and an entry here.
+pub const KNOWN_AGENTS: &[&str] = &["claude", "codex"];
+
 /// Resolve an adapter by id. v1 hard-wires the two known adapters; config may
 /// override each agent's `cmd` (the registry, not the parser). Adding a vendor =
 /// one new `impl Adapter` + a match arm here.
@@ -263,6 +269,15 @@ mod tests {
     #[test]
     fn missing_binary_does_not_resolve() {
         assert!(find_on_path("loopd-definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn every_known_agent_resolves() {
+        // KNOWN_AGENTS (used for the "unknown agent" hint) must stay in lockstep
+        // with what `adapter_for` can actually build.
+        for id in KNOWN_AGENTS {
+            assert!(adapter_for(id).is_some(), "`{id}` must resolve to an adapter");
+        }
     }
 
     #[test]
