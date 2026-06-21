@@ -23,7 +23,7 @@
 //!   buckets are disjoint. So `total_input = input_tokens` — we split out the
 //!   cached portion only for the cheaper cache-read price, never add it on top.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde::Deserialize;
 
@@ -96,6 +96,12 @@ impl Adapter for CodexAdapter {
         // flag turns cost into a one-line `pricing.rs` lookup, not a parser fork.
         false
     }
+
+    fn env(&self) -> Vec<(String, String)> {
+        // Codex (codex_core) is Rust/tracing-based; quiet its internal logs so
+        // they don't interleave with the JSON stream. Harmless if ignored.
+        vec![("RUST_LOG".to_string(), "error".to_string())]
+    }
 }
 
 // --- the stateful parser ------------------------------------------------------
@@ -119,6 +125,10 @@ pub struct CodexParser {
     session_pushed: bool,
     /// item `id` → pending tool, for `command_execution` start→complete pairing.
     tool_map: HashMap<String, PendingTool>,
+    /// Insertion order of still-pending tool ids — back = most recent. Powers the
+    /// missing-id fallback (crystal `getMostRecentPendingToolCall`): when a
+    /// completing item carries no `id`, attribute it to the most-recent pending.
+    pending_order: VecDeque<String>,
     /// Running computed-cost estimate (Codex never self-reports a dollar figure).
     computed_cost: f64,
     /// Whether a `RunStart` has been emitted yet.
@@ -133,6 +143,7 @@ impl CodexParser {
             state: RunState::default(),
             session_pushed: false,
             tool_map: HashMap::new(),
+            pending_order: VecDeque::new(),
             computed_cost: 0.0,
             started: false,
         }
@@ -140,6 +151,21 @@ impl CodexParser {
 
     fn event(&self, kind: EventKind) -> LoopEvent {
         LoopEvent::new(self.run_id.clone(), Source::Supervisor, kind)
+    }
+
+    /// Take the pending tool a completing item pairs to. Prefer an exact `id`
+    /// match; otherwise (id absent, or unknown) fall back to the **most-recent
+    /// still-pending** call (crystal `getMostRecentPendingToolCall`) so a Codex
+    /// result that omits its id never loses its `tool`/status pairing.
+    fn take_pending(&mut self, id: Option<&str>) -> Option<PendingTool> {
+        if let Some(id) = id {
+            if let Some(pt) = self.tool_map.remove(id) {
+                self.pending_order.retain(|p| p != id);
+                return Some(pt);
+            }
+        }
+        let recent = self.pending_order.pop_back()?;
+        self.tool_map.remove(&recent)
     }
 
     /// Parse one complete, non-empty line into events.
@@ -154,6 +180,13 @@ impl CodexParser {
                 return vec![ev];
             }
         };
+        // Older codex builds wrapped events as `{"msg":{"type":…}}`. Our live
+        // 0.137.0 capture used the flat form only; handle the wrapper defensively
+        // by unwrapping it so an upgrade/downgrade never silently drops events.
+        let value = match value.get("msg").filter(|m| m.get("type").is_some()) {
+            Some(msg) => msg.clone(),
+            None => value,
+        };
         let kind = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match kind {
             "thread.started" => self.on_thread_started(value),
@@ -164,10 +197,39 @@ impl CodexParser {
             "item.started" => self.on_item_started(value),
             "item.completed" => self.on_item_completed(value),
             "turn.completed" => self.on_turn_completed(value),
-            // *_delta / separators / token_count / turn-internal noise — skipped,
-            // not errors (the deeper unknown-type handling is Phase-8 step 5).
+            // Fatal signals: a stream/auth error must surface, not be buried.
+            "error" | "stream_error" | "turn.failed" | "thread.error" => self.on_error(&value),
+            // Streaming/separator noise we deliberately drop (omit-partials stance,
+            // same as the CC parser): `*_delta`, `agent_reasoning_section_break`,
+            // bare `token_count`, and any other unknown `type` → never crash.
             _ => Vec::new(),
         }
+    }
+
+    /// Surface a Codex error line. A `401`/`Unauthorized` means the user must log
+    /// in — name that explicitly (the reserved `ExecutorError::AuthRequired`
+    /// taxonomy; the parser can't return it, so it emits a clear `Error` event the
+    /// supervisor/CLI shows). A fatal error also closes the run.
+    fn on_error(&mut self, value: &serde_json::Value) -> Vec<LoopEvent> {
+        // The message can live under `message`, `error`, or `error.message`.
+        let msg = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| value.get("error").and_then(|e| e.as_str()))
+            .or_else(|| value.pointer("/error/message").and_then(|m| m.as_str()))
+            .unwrap_or("codex stream error")
+            .to_string();
+        let is_auth = msg.contains("401") || msg.to_ascii_lowercase().contains("unauthorized");
+        let text = if is_auth {
+            format!("codex needs you to log in first (run `codex login`): {msg}")
+        } else {
+            msg
+        };
+        let mut ev = self.event(EventKind::Error);
+        ev.text = Some(text);
+        self.state.ended = true;
+        self.state.exit_ok = Some(false);
+        vec![ev, self.event(EventKind::RunEnd)]
     }
 
     fn on_thread_started(&mut self, value: serde_json::Value) -> Vec<LoopEvent> {
@@ -213,6 +275,7 @@ impl CodexParser {
                     input_hash: hash,
                 },
             );
+            self.pending_order.push_back(id.clone());
         }
         let mut ev = self.event(EventKind::ToolUse);
         ev.tool = Some(display);
@@ -230,7 +293,9 @@ impl CodexParser {
         let iter = Some(self.state.iteration);
         match item.item_type.as_deref() {
             Some("command_execution") => {
-                let pending = item.id.as_ref().and_then(|id| self.tool_map.remove(id));
+                // Pair by id, else fall back to the most-recent pending call so a
+                // result that omits its id still reports status (step 4).
+                let pending = self.take_pending(item.id.as_deref());
                 let mut ev = self.event(EventKind::ToolResult);
                 ev.tool = pending.as_ref().map(|p| p.name.clone()).or(Some("shell".into()));
                 ev.tool_input_hash = pending.and_then(|p| p.input_hash);
@@ -490,6 +555,39 @@ mod tests {
             .find(|e| e.kind == EventKind::ToolResult)
             .unwrap();
         assert_eq!(tr.tool_status, Some(ToolStatus::Error));
+    }
+
+    #[test]
+    fn result_without_id_pairs_to_most_recent_pending() {
+        // Codex results sometimes omit the call id. The completing command (no
+        // `id`) must still pair to the prior `item.started` and report Error on a
+        // non-zero exit_code (step 4 — getMostRecentPendingToolCall fallback).
+        let mut p = CodexParser::new("run_cx_6");
+        let completed_no_id = r#"{"type":"item.completed","item":{"type":"command_execution","command":"false","aggregated_output":"boom","exit_code":2,"status":"completed"}}"#;
+        let events = parse_all(
+            &mut p,
+            &[THREAD_STARTED, TURN_STARTED, ITEM_STARTED_CMD, completed_no_id],
+        );
+        let tr = events
+            .iter()
+            .find(|e| e.kind == EventKind::ToolResult)
+            .expect("a result must be emitted even without an id");
+        assert_eq!(tr.tool.as_deref(), Some("shell"));
+        assert_eq!(tr.tool_status, Some(ToolStatus::Error));
+    }
+
+    #[test]
+    fn auth_error_is_surfaced_not_buried() {
+        let mut p = CodexParser::new("run_cx_7");
+        let err = r#"{"type":"stream_error","message":"request failed: 401 Unauthorized"}"#;
+        let events = parse_all(&mut p, &[THREAD_STARTED, err]);
+        let e = events
+            .iter()
+            .find(|e| e.kind == EventKind::Error)
+            .expect("a 401 must surface as an Error event");
+        assert!(e.text.as_deref().unwrap().contains("log in"));
+        // A fatal error closes the run.
+        assert!(p.run_state().ended && p.run_state().exit_ok == Some(false));
     }
 
     #[test]
