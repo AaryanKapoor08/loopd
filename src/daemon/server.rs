@@ -32,6 +32,7 @@ use crate::config::{Config, OnTrip};
 use crate::core::detector::{Action, Governor};
 use crate::core::events::{new_run_id, now_ms, LoopEvent, Run, RunReason, RunStatus};
 use crate::core::store::Store;
+use crate::observer::sdk::{SdkReportReq, SdkTrackReq};
 use crate::observer::webhook::IngestResponse;
 use crate::supervisor::SupervisorRegistry;
 
@@ -83,6 +84,9 @@ pub fn app(state: AppState) -> Router {
         .route("/runs/:id/pause", post(pause_run))
         .route("/runs/:id/resume", post(resume_run))
         .route("/ingest", post(ingest))
+        .route("/sdk/track", post(sdk_track))
+        .route("/sdk/report", post(sdk_report))
+        .route("/sdk/runs/:id", get(sdk_verdict))
         .with_state(state)
 }
 
@@ -204,20 +208,42 @@ fn governance_tick(state: &AppState, gov: &mut Governor) {
         }
     }
 
-    // 4. Apply process actions via the supervisor (off the lock). Owned runs only
-    //    reach here — clamp_action already degraded unowned pause/kill to notify.
+    // 4. Apply pause/kill (off the lock). Two enforcement paths reach here —
+    //    clamp_action already degraded *observed* runs to notify, so a Pause/Kill
+    //    is either an owned process or a remotely-enforced (SDK) run:
+    //    - owned (Mode A): tell the supervisor to stop the real process;
+    //    - SDK (`enforced_remotely`): no process to touch — fold the action into
+    //      the store so the verdict the client reads back carries it.
     for (id, _, _, action) in &to_act {
-        match action {
-            Action::Pause => {
-                state.supervisor.pause(id);
-            }
-            Action::Kill => {
-                if let Ok(store) = state.store.lock() {
-                    let _ = store.request_kill(id);
+        if !matches!(action, Action::Pause | Action::Kill) {
+            continue;
+        }
+        // Default to the owned path if the row vanished, preserving prior behavior.
+        let owned = state
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_run(id).ok().flatten())
+            .map(|r| r.owned)
+            .unwrap_or(true);
+        if owned {
+            match action {
+                Action::Pause => {
+                    state.supervisor.pause(id);
                 }
-                state.supervisor.kill(id);
+                Action::Kill => {
+                    if let Ok(store) = state.store.lock() {
+                        let _ = store.request_kill(id);
+                    }
+                    state.supervisor.kill(id);
+                }
+                _ => {}
             }
-            _ => {}
+        } else if let Ok(store) = state.store.lock() {
+            if let Ok(Some(mut run)) = store.get_run(id) {
+                crate::core::detector::fold_remote_action(&mut run, *action);
+                let _ = store.upsert_run(&run);
+            }
         }
     }
 
@@ -489,6 +515,41 @@ async fn ingest(
     Json(crate::observer::webhook::ingest_hook(&state.store, &payload))
 }
 
+/// Surface-2 register (`POST /sdk/track`): create a `source = Sdk` run loopd does
+/// not own but governs via the verdict channel (ARCHITECTURE §4). Returns the new
+/// run id with an initial verdict.
+async fn sdk_track(
+    State(state): State<AppState>,
+    Json(req): Json<SdkTrackReq>,
+) -> Result<(StatusCode, Json<IngestResponse>), ApiError> {
+    let resp = crate::observer::sdk::track(&state.store, &req)
+        .ok_or_else(|| ApiError::Internal(anyhow!("failed to register sdk run")))?;
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// Surface-2 report (`POST /sdk/report`): fold one event into a tracked run, roll
+/// up its metrics, govern it synchronously, and return the verdict the SDK obeys.
+/// 404 if the run id is unknown.
+async fn sdk_report(
+    State(state): State<AppState>,
+    Json(req): Json<SdkReportReq>,
+) -> Result<Json<IngestResponse>, ApiError> {
+    crate::observer::sdk::report(&state.store, &state.config, &req)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("run {}", req.run_id)))
+}
+
+/// Surface-2 verdict poll (`GET /sdk/runs/:id`): the standing verdict for a
+/// tracked run — what the SDK's `check()` reads at the top of each turn.
+async fn sdk_verdict(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<IngestResponse>, ApiError> {
+    crate::observer::sdk::verdict(&state.store, &id)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("run {id}")))
+}
+
 // --- errors ------------------------------------------------------------------
 
 /// Route error type. Maps cleanly onto an HTTP status + a small JSON body so
@@ -642,6 +703,96 @@ mod tests {
         let runs = state.store.lock().unwrap().list_runs().unwrap();
         assert_eq!(runs.len(), 1);
         assert!(!runs[0].owned);
+    }
+
+    #[tokio::test]
+    async fn sdk_track_then_report_over_cap_kills_via_routes() {
+        // The full Surface-2 seam over HTTP: register a programmatic loop, report
+        // cost until the cap trips, and confirm the verdict channel returns kill
+        // (what the SDK's check() throws on). Same governance as a CLI run.
+        let state = test_state();
+
+        // POST /sdk/track → 201 + a run id.
+        let track_body = serde_json::json!({
+            "label": "api loop",
+            "agent": "anthropic",
+            "maxCostUsd": 0.5,
+            "onTrip": "kill"
+        });
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sdk/track")
+                    .header("content-type", "application/json")
+                    .body(Body::from(track_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let v = body_json(resp).await;
+        assert_eq!(v["verdict"], "ok");
+        let run_id = v["runId"].as_str().unwrap().to_string();
+
+        // The run shows up unowned in /runs (it appears in `loop dash`).
+        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert!(!run.owned);
+        assert_eq!(run.run_reason, RunReason::Sdk);
+
+        // POST /sdk/report with cost over the cap → verdict kill.
+        let report_body = serde_json::json!({
+            "runId": run_id,
+            "kind": "token_usage",
+            "costUsd": 0.9
+        });
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sdk/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(report_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["verdict"], "kill");
+
+        // GET /sdk/runs/:id echoes the standing kill for check() to poll.
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sdk/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["verdict"], "kill");
+
+        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn sdk_report_unknown_run_is_404() {
+        let body = serde_json::json!({ "runId": "run_nope", "costUsd": 1.0 });
+        let resp = app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sdk/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

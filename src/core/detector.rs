@@ -22,7 +22,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::config::{Caps, Config, OnTrip, Runaway};
-use crate::core::events::{now_ms, LoopEvent, Run};
+use crate::core::events::{now_ms, LoopEvent, Run, RunStatus};
 use crate::core::git;
 use crate::policies::{builtin_policies, DetectCtx, Policy};
 
@@ -133,7 +133,11 @@ impl Governor {
             };
         }
 
-        let action = clamp_action(effective_on_trip(run, config), run.owned);
+        let action = clamp_action(
+            effective_on_trip(run, config),
+            run.owned,
+            run.enforced_remotely(),
+        );
         // Don't re-issue Pause/Kill while the prior one is still settling.
         let action = match action {
             Action::Pause | Action::Kill if self.acted.get(&run.run_id) == Some(&action) => {
@@ -228,18 +232,57 @@ impl Governor {
     }
 }
 
-/// Clamp an [`OnTrip`] policy to an actionable [`Action`] given ownership. An
-/// observed (unowned) run has no process loopd can stop, so `Pause`/`Kill`
+/// Clamp an [`OnTrip`] policy to an actionable [`Action`] given how the run can
+/// be enforced. `Pause`/`Kill` need *some* lever to pull:
+/// - `owned` (Mode A) — loopd can stop the process directly;
+/// - `enforced` (Surface-2 SDK) — loopd can't touch the process, but the client
+///   reads the verdict back and obeys it ([`Run::enforced_remotely`]).
+///
+/// A run that is neither (an observed Mode-B run) has no lever, so `Pause`/`Kill`
 /// degrade to `Notify` (ARCHITECTURE §7).
-pub fn clamp_action(on_trip: OnTrip, owned: bool) -> Action {
+pub fn clamp_action(on_trip: OnTrip, owned: bool, enforced: bool) -> Action {
+    let actionable = owned || enforced;
     match on_trip {
         OnTrip::Warn => Action::Warn,
         OnTrip::Notify => Action::Notify,
-        OnTrip::Pause if owned => Action::Pause,
-        OnTrip::Kill if owned => Action::Kill,
-        // Unowned: can't touch a process we don't own.
+        OnTrip::Pause if actionable => Action::Pause,
+        OnTrip::Kill if actionable => Action::Kill,
+        // No lever (observed run): can't touch a process we don't own, and there
+        // is no client obeying a verdict.
         OnTrip::Pause | OnTrip::Kill => Action::Notify,
     }
+}
+
+/// Fold a clamped [`Action`] into a **remotely-enforced** (non-owned) run's state
+/// in place. loopd owns no process here, so "enforcement" is purely the run state
+/// the client reads back as a [`crate::core::events::Verdict`]
+/// (`observer::verdict_for`) and obeys: a `Kill` marks the run `Killed`, a `Pause`
+/// marks it `Paused`. A flagging `Warn`/`Notify` flips a live run to `Stuck`; a
+/// clear (`None`) recovers a `Stuck` run to `Running`. `run.flags` must already be
+/// set by the caller. Used for `source = Sdk` runs (ARCHITECTURE §4); owned runs
+/// go through the supervisor instead.
+pub fn fold_remote_action(run: &mut Run, action: Action) {
+    match action {
+        Action::Kill => {
+            run.kill_requested = true;
+            run.status = RunStatus::Killed;
+            run.ended_at = Some(now_ms());
+        }
+        Action::Pause => {
+            run.status = RunStatus::Paused;
+        }
+        Action::Warn | Action::Notify => {
+            if !run.flags.is_empty() && run.status == RunStatus::Running {
+                run.status = RunStatus::Stuck;
+            }
+        }
+        Action::None => {
+            if run.status == RunStatus::Stuck {
+                run.status = RunStatus::Running;
+            }
+        }
+    }
+    run.updated_at = now_ms();
 }
 
 /// Effective cap thresholds for a run: each per-run override (from `loop run
@@ -311,11 +354,58 @@ mod tests {
 
     #[test]
     fn clamp_degrades_unowned_pause_and_kill() {
-        assert_eq!(clamp_action(OnTrip::Pause, true), Action::Pause);
-        assert_eq!(clamp_action(OnTrip::Kill, true), Action::Kill);
-        assert_eq!(clamp_action(OnTrip::Pause, false), Action::Notify);
-        assert_eq!(clamp_action(OnTrip::Kill, false), Action::Notify);
-        assert_eq!(clamp_action(OnTrip::Warn, false), Action::Warn);
+        // Owned (Mode A): loopd can stop the process.
+        assert_eq!(clamp_action(OnTrip::Pause, true, false), Action::Pause);
+        assert_eq!(clamp_action(OnTrip::Kill, true, false), Action::Kill);
+        // Neither owned nor enforced (observed Mode-B): no lever → notify.
+        assert_eq!(clamp_action(OnTrip::Pause, false, false), Action::Notify);
+        assert_eq!(clamp_action(OnTrip::Kill, false, false), Action::Notify);
+        assert_eq!(clamp_action(OnTrip::Warn, false, false), Action::Warn);
+    }
+
+    #[test]
+    fn clamp_keeps_pause_and_kill_for_remotely_enforced_runs() {
+        // Surface-2 SDK: unowned, but the client obeys the verdict, so the action
+        // survives the clamp (the SDK's check() will throw).
+        assert_eq!(clamp_action(OnTrip::Pause, false, true), Action::Pause);
+        assert_eq!(clamp_action(OnTrip::Kill, false, true), Action::Kill);
+        assert_eq!(clamp_action(OnTrip::Warn, false, true), Action::Warn);
+    }
+
+    #[test]
+    fn sdk_run_over_a_cost_cap_decides_kill_not_notify() {
+        use crate::core::events::RunReason;
+        let mut gov = Governor::new();
+        let mut run = looping_run();
+        run.owned = false; // loopd does not own an SDK loop's process
+        run.run_reason = RunReason::Sdk; // ...but it is enforced remotely
+        run.cost_usd = 5.0;
+        run.max_cost_usd = Some(1.0);
+        run.on_trip = Some(OnTrip::Kill);
+        let d = gov.evaluate(&run, &[], &Config::default());
+        assert!(d.flags.contains(&"cap-cost".to_string()));
+        assert_eq!(d.action, Action::Kill, "an SDK kill must not degrade to notify");
+    }
+
+    #[test]
+    fn fold_remote_action_marks_kill_and_pause() {
+        let mut run = looping_run();
+        run.flags = vec!["cap-cost".into()];
+        fold_remote_action(&mut run, Action::Kill);
+        assert_eq!(run.status, RunStatus::Killed);
+        assert!(run.kill_requested);
+        assert!(run.ended_at.is_some());
+
+        let mut paused = looping_run();
+        fold_remote_action(&mut paused, Action::Pause);
+        assert_eq!(paused.status, RunStatus::Paused);
+        assert!(paused.ended_at.is_none(), "a paused run is resumable, not ended");
+
+        // A clearing tick recovers a Stuck run.
+        let mut stuck = looping_run();
+        stuck.status = RunStatus::Stuck;
+        fold_remote_action(&mut stuck, Action::None);
+        assert_eq!(stuck.status, RunStatus::Running);
     }
 
     #[test]

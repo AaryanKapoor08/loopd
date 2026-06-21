@@ -340,6 +340,16 @@ impl Run {
             owned: false,
         }
     }
+
+    /// Whether governance for this run is enforced by the *client*, not by loopd
+    /// touching a process. True for `source = Sdk` runs (ARCHITECTURE §4): loopd
+    /// owns no OS process, so the worst it does is set the run's [`Verdict`] to
+    /// `pause`/`kill` and the SDK's `check()` obeys it. Contrast `owned` (Mode A,
+    /// loopd can stop the process) and observed runs (`owned == false` *and* not
+    /// enforced — they clamp to `notify`).
+    pub fn enforced_remotely(&self) -> bool {
+        matches!(self.run_reason, RunReason::Sdk)
+    }
 }
 
 /// Current Unix time in milliseconds. Saturates to 0 before the epoch (which

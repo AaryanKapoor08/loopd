@@ -14,12 +14,17 @@
 //!   (`POST /ingest`), and the verdict return channel.
 //! - [`transcript`] — `notify`-watch `~/.claude/projects/**/*.jsonl`, feeding the
 //!   same `StreamParser` as Mode A (the canonical token/iteration source).
+//! - [`sdk`]        — Surface 2: register/report/poll a programmatic loop
+//!   (`POST /sdk/track`, `POST /sdk/report`, `GET /sdk/runs/:id`). Not read-only
+//!   like Mode B — it shares the same verdict channel, and the SDK *enforces* it
+//!   (`pause`/`kill` make `check()` throw), since loopd owns no process to stop.
 //!
 //! Both feeds reconcile through the **store**: each finds-or-creates the one
 //! observed run for a session via [`observe_run`], so a hook and the transcript
 //! never produce two runs for one session. The store mutex (the daemon is the
 //! only writer) serializes their writes.
 
+pub mod sdk;
 pub mod transcript;
 pub mod webhook;
 
