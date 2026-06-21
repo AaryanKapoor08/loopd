@@ -1,7 +1,6 @@
 {
   "name": "@loopd/sdk",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "TypeScript SDK for loopd (Surface 2): wrap programmatic / API / framework agent loops so they appear in the loopd cockpit and obey its governance. Wire types are generated from the Rust core via ts-rs.",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
@@ -21,8 +21,19 @@
   "scripts": {
     "prebuild": "cd .. && cargo test export_bindings --quiet",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AaryanKapoor08/loopd.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/AaryanKapoor08/loopd#readme",
+  "bugs": {
+    "url": "https://github.com/AaryanKapoor08/loopd/issues"
+  },
+  "author": "Aaryan Kapoor",
   "keywords": [
     "ai",
     "agents",
