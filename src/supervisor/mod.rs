@@ -115,6 +115,7 @@ impl SupervisorRegistry {
 
     /// Re-spawn `run_id` to resume the agent session `session_id`, continuing
     /// `task`. Used by pause→resume (the parser drops the replayed history).
+    #[allow(clippy::too_many_arguments)] // mirrors spawn + the session id; grouping would obscure it
     pub fn resume(
         &self,
         adapter: &dyn Adapter,
@@ -233,26 +234,32 @@ impl SupervisorRegistry {
     }
 
     /// Request a hard stop of `run_id` (the worst action loopd takes). Returns
-    /// `false` if the run isn't owned/known here. The reader thread observes the
-    /// flag and marks the run `Killed`.
+    /// `false` if the run isn't owned/known here or has already finished — a
+    /// finished handle's pid may have been reused by an unrelated process, so it
+    /// must never be killed again. The reader thread observes the flag and marks
+    /// the run `Killed`.
     pub fn kill(&self, run_id: &str) -> bool {
         match self.handle(run_id) {
-            Some(h) => {
+            Some(h) if !h.finished.load(Ordering::SeqCst) => {
                 h.kill_requested.store(true, Ordering::SeqCst);
                 if let Some(pid) = h.pid {
                     kill_tree(pid);
                 }
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
     /// Pause `run_id`: capture the agent session id (already streamed) and stop
     /// the process. Resume re-spawns via [`resume`]. Returns the captured session
-    /// id, or `None` if the run is unknown / never revealed one.
+    /// id, or `None` if the run is unknown, already finished (same pid-reuse
+    /// guard as [`kill`]), or never revealed one.
     pub fn pause(&self, run_id: &str) -> Option<String> {
         let h = self.handle(run_id)?;
+        if h.finished.load(Ordering::SeqCst) {
+            return None;
+        }
         h.paused.store(true, Ordering::SeqCst);
         let sid = h.session_id();
         if let Some(pid) = h.pid {
@@ -261,11 +268,12 @@ impl SupervisorRegistry {
         sid
     }
 
-    /// Is this run owned (and currently tracked) here?
+    /// Is this run owned *and still live* here? Finished handles stay in the
+    /// registry (for bookkeeping) but no longer count — there is no process left
+    /// to act on.
     pub fn owns(&self, run_id: &str) -> bool {
-        self.runs
-            .lock()
-            .map(|m| m.contains_key(run_id))
+        self.handle(run_id)
+            .map(|h| !h.finished.load(Ordering::SeqCst))
             .unwrap_or(false)
     }
 
