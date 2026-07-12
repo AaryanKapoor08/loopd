@@ -55,6 +55,8 @@ pub struct Config {
     pub daemon: DaemonConfig,
     /// Default run settings + governance policy.
     pub defaults: Defaults,
+    /// Observer (Mode-B) settings.
+    pub observer: ObserverConfig,
     /// Known agents, keyed by name (`claude`, `codex`, …). A `BTreeMap` keeps
     /// the order stable for deterministic serialization.
     pub agents: BTreeMap<String, AgentConfig>,
@@ -65,6 +67,7 @@ impl Default for Config {
         Self {
             daemon: DaemonConfig::default(),
             defaults: Defaults::default(),
+            observer: ObserverConfig::default(),
             agents: default_agents(),
         }
     }
@@ -202,6 +205,26 @@ impl Default for NoProgress {
     }
 }
 
+/// Observer (Mode-B) settings — how loopd treats sessions it only watches.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ObserverConfig {
+    /// Close an observed run as `done` after this many minutes without any
+    /// activity (no hook, no transcript append). Backstop for sessions that
+    /// never fire a `SessionEnd` hook; fresh activity on the same session id
+    /// revives the run. `0` disables the idle close. Set it via
+    /// `loop set observer.idleTimeoutMin <n>`.
+    pub idle_timeout_min: u32,
+}
+
+impl Default for ObserverConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_min: 30,
+        }
+    }
+}
+
 /// How to invoke one agent in headless mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -291,6 +314,7 @@ mod tests {
         assert_eq!(config.defaults.runaway.error_streak, 4);
         assert_eq!(config.defaults.no_progress.iterations, 5);
         assert!(config.defaults.no_progress.test_command.is_none());
+        assert_eq!(config.observer.idle_timeout_min, 30);
         assert!(config.agents.contains_key("claude"));
         assert!(config.agents.contains_key("codex"));
         config.validate().expect("defaults are valid");

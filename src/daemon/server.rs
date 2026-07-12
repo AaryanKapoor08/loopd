@@ -39,12 +39,18 @@ use crate::supervisor::SupervisorRegistry;
 /// How often the governance detector sweeps live runs.
 const GOVERNANCE_TICK: Duration = Duration::from_millis(1500);
 
-/// Observed (Mode-B) runs with no activity for this long are presumed over and
-/// closed as `Done`. Backstop for sessions that never fire a `SessionEnd` hook
-/// (hooks not installed, terminal killed, machine slept) — without it an
-/// abandoned session sits `Running` forever and trips `cap-duration`. Fresh
-/// activity on the same session id revives the run (`observer::revive_if_observed`).
-const OBSERVED_IDLE_TIMEOUT_MS: i64 = 30 * 60 * 1000;
+/// Observed (Mode-B) runs with no activity for `config.observer.idle_timeout_min`
+/// are presumed over and closed as `Done` by the governance tick. Backstop for
+/// sessions that never fire a `SessionEnd` hook (hooks not installed, terminal
+/// killed, machine slept) — without it an abandoned session sits `Running`
+/// forever and trips `cap-duration`. Fresh activity on the same session id
+/// revives the run (`observer::revive_if_observed`); `0` disables the sweep.
+fn observed_idle_timeout_ms(config: &Config) -> Option<i64> {
+    match config.observer.idle_timeout_min {
+        0 => None,
+        min => Some(i64::from(min) * 60_000),
+    }
+}
 
 /// Shared state handed to every route. `Clone` is cheap — everything is behind
 /// an `Arc`. The `Store` is additionally wrapped in a `Mutex` because a
@@ -164,6 +170,7 @@ fn governance_tick(state: &AppState, gov: &mut Governor) {
     //    Observed runs that have gone quiet past the idle timeout are closed here
     //    instead of evaluated — their session is presumed over.
     let now = now_ms();
+    let idle_timeout_ms = observed_idle_timeout_ms(&state.config);
     let snapshot: Vec<(Run, Vec<LoopEvent>)> = {
         let Ok(store) = state.store.lock() else {
             return;
@@ -173,7 +180,10 @@ fn governance_tick(state: &AppState, gov: &mut Governor) {
             .filter(|r| matches!(r.status, RunStatus::Running | RunStatus::Stuck))
             .filter(|r| {
                 let observed = !r.owned && !r.enforced_remotely();
-                if observed && now.saturating_sub(r.last_event_at) > OBSERVED_IDLE_TIMEOUT_MS {
+                let idle = idle_timeout_ms
+                    .map(|t| now.saturating_sub(r.last_event_at) > t)
+                    .unwrap_or(false);
+                if observed && idle {
                     let mut closed = r.clone();
                     closed.status = RunStatus::Done;
                     // The session's last sign of life is its effective end.
@@ -933,7 +943,9 @@ mod tests {
                 run.run_reason = RunReason::Observed;
                 run.status = RunStatus::Running;
                 if idle {
-                    run.last_event_at = now_ms() - OBSERVED_IDLE_TIMEOUT_MS - 60_000;
+                    let timeout = observed_idle_timeout_ms(&Config::default())
+                        .expect("default idle timeout is enabled");
+                    run.last_event_at = now_ms() - timeout - 60_000;
                 }
                 store.upsert_run(&run).unwrap();
             }
@@ -948,6 +960,44 @@ mod tests {
         assert_eq!(idle.ended_at, Some(idle.last_event_at));
         let fresh = store.get_run(&fresh_id).unwrap().unwrap();
         assert_eq!(fresh.status, RunStatus::Running, "fresh run must stay live");
+    }
+
+    #[test]
+    fn idle_timeout_zero_disables_the_sweep() {
+        let mut config = Config::default();
+        config.observer.idle_timeout_min = 0;
+        let dir = std::env::temp_dir().join(format!("loopd_srv_{}", new_run_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("test.db")).expect("open store");
+        let state = AppState::new(store, config);
+
+        let run_id = new_run_id();
+        {
+            let store = state.store.lock().unwrap();
+            let mut run = Run::new(&run_id);
+            run.agent = "claude".into();
+            run.owned = false;
+            run.run_reason = RunReason::Observed;
+            run.status = RunStatus::Running;
+            run.last_event_at = now_ms() - 24 * 60 * 60_000; // a day of silence
+            store.upsert_run(&run).unwrap();
+        }
+
+        let mut gov = Governor::new();
+        governance_tick(&state, &mut gov);
+
+        let run = state
+            .store
+            .lock()
+            .unwrap()
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.status,
+            RunStatus::Running,
+            "idleTimeoutMin: 0 must keep observed runs open"
+        );
     }
 
     /// A throwaway adapter whose program is a long-running system command; it
