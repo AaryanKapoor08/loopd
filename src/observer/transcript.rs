@@ -292,6 +292,9 @@ fn persist_transcript(
         let now = now_ms();
         if !events.is_empty() {
             run.last_event_at = now;
+            // A closed observed run that appends again is alive again (a session
+            // resumed after SessionEnd / the idle-timeout close).
+            super::revive_if_observed(&mut run);
         }
         run.updated_at = now;
         let _ = store.upsert_run(&run);

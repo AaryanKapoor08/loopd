@@ -102,6 +102,12 @@ export interface TrackedRun {
   /** Report an arbitrary event (the general form behind the helpers above). */
   event(e: ReportEvent): Promise<Verdict>;
   /**
+   * Mark the loop finished. Closes the run in the cockpit (`done`); without it
+   * the run would show as running until loopd's idle handling caught up. Call
+   * once when the loop exits (a `finally` block is the natural place).
+   */
+  end(): Promise<Verdict>;
+  /**
    * Read the latest verdict and enforce it: throws {@link LoopdHaltError} if the
    * run has been told to `pause` or `kill`. Call this at the top of each loop turn.
    */
@@ -152,6 +158,10 @@ class DaemonTrackedRun implements TrackedRun {
     if (!this.enabled) return "ok";
     const resp = await post(this.daemonUrl, "/sdk/report", { runId: this.runId, ...e });
     return resp?.verdict ?? "ok";
+  }
+
+  end(): Promise<Verdict> {
+    return this.event({ kind: "run_end" });
   }
 
   async check(): Promise<void> {

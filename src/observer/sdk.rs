@@ -176,6 +176,21 @@ pub fn report(
         run.last_event_at = now;
         run.updated_at = now;
 
+        // The loop declaring itself finished ends the run cleanly — without this
+        // an SDK run would sit `Running` in the cockpit forever after the loop
+        // returned. No governance on a run that just ended.
+        if req.kind == Some(EventKind::RunEnd) {
+            run.status = RunStatus::Done;
+            run.ended_at = Some(now);
+            let ev = build_event(&run.run_id, req, run.iteration);
+            let _ = store.insert_event(&ev);
+            let _ = store.upsert_run(&run);
+            return Some(IngestResponse {
+                run_id: Some(run.run_id.clone()),
+                verdict: verdict_for(&run),
+            });
+        }
+
         let ev = build_event(&run.run_id, req, run.iteration);
         let _ = store.insert_event(&ev);
         let _ = store.upsert_run(&run);
@@ -347,6 +362,43 @@ mod tests {
 
         // verdict() echoes the standing kill for check() to poll.
         assert_eq!(verdict(&store, &run_id).unwrap().verdict, Verdict::Kill);
+    }
+
+    #[test]
+    fn a_run_end_report_closes_the_run() {
+        let store = test_store();
+        let run_id = track_kill(&store, 100.0);
+
+        let resp = report(
+            &store,
+            &Config::default(),
+            &SdkReportReq {
+                run_id: run_id.clone(),
+                kind: Some(EventKind::RunEnd),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(resp.verdict, Verdict::Ok, "a clean end is not a kill");
+
+        let run = store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Done, "run_end must close the run");
+        assert!(run.ended_at.is_some());
+
+        // Further reports are the documented no-op echo of the standing verdict.
+        let again = report(
+            &store,
+            &Config::default(),
+            &SdkReportReq {
+                run_id: run_id.clone(),
+                cost_usd: Some(1.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(again.verdict, Verdict::Ok);
+        let run = store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert!((run.cost_usd).abs() < 1e-9, "no rollup after the run ended");
     }
 
     #[test]

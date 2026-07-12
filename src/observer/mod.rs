@@ -73,14 +73,28 @@ pub fn observe_run(
 
 /// Bump a run's liveness timestamp (it's active right now) without touching the
 /// canonical metrics the transcript owns. Used by the low-latency hook feed.
+/// Fresh activity also **revives** an observed run that was previously closed
+/// (SessionEnd / idle-timeout): the same session id resuming means the session
+/// is alive again, so `Done` flips back to `Running`.
 pub fn touch_run(store: &Arc<Mutex<Store>>, run_id: &str) {
     if let Ok(store) = store.lock() {
         if let Ok(Some(mut run)) = store.get_run(run_id) {
             let now = now_ms();
+            revive_if_observed(&mut run);
             run.last_event_at = now;
             run.updated_at = now;
             let _ = store.upsert_run(&run);
         }
+    }
+}
+
+/// Flip a closed **observed** run back to `Running` on fresh activity. Only the
+/// benign `Done` close reopens — `Failed`/`Killed`/owned/SDK runs are left alone
+/// (those ends carry meaning beyond "the session went quiet").
+pub fn revive_if_observed(run: &mut Run) {
+    if !run.owned && run.run_reason == RunReason::Observed && run.status == RunStatus::Done {
+        run.status = RunStatus::Running;
+        run.ended_at = None;
     }
 }
 

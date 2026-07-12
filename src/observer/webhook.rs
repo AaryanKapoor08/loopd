@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::agents::adapter_for;
-use crate::core::events::{EventKind, LoopEvent, Source, Verdict};
+use crate::core::events::{EventKind, LoopEvent, RunStatus, Source, Verdict};
 use crate::core::store::Store;
 
 use super::{observe_run, touch_run, verdict_for};
@@ -92,14 +92,18 @@ pub fn ingest_hook(store: &Arc<Mutex<Store>>, payload: &serde_json::Value) -> In
     };
 
     // First sight → one hook-sourced RunStart (transcripts never emit one, so no
-    // collision). Otherwise just refresh liveness; tokens/tools are the
-    // transcript's job.
+    // collision). A SessionEnd closes the run — without it an observed session
+    // would sit `Running` forever and trip `cap-duration` after 30 minutes.
+    // Otherwise just refresh liveness; tokens/tools are the transcript's job.
     if created {
         if let Ok(store) = store.lock() {
             let ev = LoopEvent::new(run_id.clone(), Source::Hook, EventKind::RunStart);
             let _ = store.insert_event(&ev);
         }
-    } else {
+    }
+    if p.hook_event_name.as_deref() == Some("SessionEnd") {
+        end_observed_run(store, &run_id);
+    } else if !created {
         touch_run(store, &run_id);
     }
 
@@ -115,6 +119,30 @@ pub fn ingest_hook(store: &Arc<Mutex<Store>>, payload: &serde_json::Value) -> In
         run_id: Some(run_id),
         verdict,
     }
+}
+
+/// Close an observed run on its `SessionEnd` hook: mark it `Done`, stamp
+/// `ended_at`, and append a hook-sourced `RunEnd` (the transcript never emits
+/// one). Only a live run transitions — a run the detector already ended stays
+/// as it is.
+fn end_observed_run(store: &Arc<Mutex<Store>>, run_id: &str) {
+    let Ok(store) = store.lock() else {
+        return;
+    };
+    let Ok(Some(mut run)) = store.get_run(run_id) else {
+        return;
+    };
+    if !matches!(run.status, RunStatus::Running | RunStatus::Stuck) {
+        return;
+    }
+    let now = crate::core::events::now_ms();
+    run.status = RunStatus::Done;
+    run.ended_at = Some(now);
+    run.last_event_at = now;
+    run.updated_at = now;
+    let _ = store.upsert_run(&run);
+    let ev = LoopEvent::new(run_id, Source::Hook, EventKind::RunEnd);
+    let _ = store.insert_event(&ev);
 }
 
 #[cfg(test)]
@@ -198,6 +226,52 @@ mod tests {
         // pause/kill).
         let resp = ingest_hook(&store, &post_tool_use());
         assert_eq!(resp.verdict, Verdict::Warn);
+    }
+
+    #[test]
+    fn session_end_closes_the_observed_run() {
+        let store = test_store();
+        let run_id = ingest_hook(&store, &session_start()).run_id.unwrap();
+
+        let resp = ingest_hook(
+            &store,
+            &serde_json::json!({
+                "session_id": "sess_obs_1",
+                "cwd": "C:\\dev\\loop",
+                "hook_event_name": "SessionEnd",
+                "reason": "exit"
+            }),
+        );
+        assert_eq!(resp.run_id.as_deref(), Some(run_id.as_str()));
+
+        let run = store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Done, "SessionEnd must close the run");
+        assert!(run.ended_at.is_some());
+        // The lifecycle is anchored by a hook RunEnd (transcripts never emit one).
+        let events = store.lock().unwrap().events_for_run(&run_id, 10).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == EventKind::RunEnd && e.source == Source::Hook));
+    }
+
+    #[test]
+    fn a_hook_after_session_end_revives_the_run() {
+        // A resumed session (same session id) must come back to life, not stay
+        // stuck on the stale `Done` row.
+        let store = test_store();
+        let run_id = ingest_hook(&store, &session_start()).run_id.unwrap();
+        ingest_hook(
+            &store,
+            &serde_json::json!({
+                "session_id": "sess_obs_1",
+                "hook_event_name": "SessionEnd"
+            }),
+        );
+        let resp = ingest_hook(&store, &post_tool_use());
+        assert_eq!(resp.run_id.as_deref(), Some(run_id.as_str()));
+        let run = store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Running, "activity must revive the run");
+        assert!(run.ended_at.is_none());
     }
 
     #[test]

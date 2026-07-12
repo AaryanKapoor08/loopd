@@ -16,10 +16,12 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde_json::{json, Value};
 
-/// The hook events loopd installs into. `PostToolUse`/`Stop` are liveness; the
-/// canonical token rollup comes from the transcript tailer, so these three are
-/// enough to make a session appear and stay live.
-const EVENTS: [&str; 3] = ["SessionStart", "PostToolUse", "Stop"];
+/// The hook events loopd installs into. `PostToolUse`/`Stop` are liveness;
+/// `SessionEnd` closes the observed run the moment the session exits (else it
+/// would sit `Running` until the idle-timeout sweep). The canonical token rollup
+/// comes from the transcript tailer, so these four are enough to make a session
+/// appear, stay live, and end.
+const EVENTS: [&str; 4] = ["SessionStart", "PostToolUse", "Stop", "SessionEnd"];
 
 /// `loop hooks <action>`.
 #[derive(Subcommand, Debug)]
@@ -263,7 +265,7 @@ mod tests {
     fn install_is_non_destructive_and_idempotent() {
         let path = temp_settings(EXISTING);
         let installed = install_into(&path, CMD).unwrap();
-        assert_eq!(installed.len(), 3, "all three events installed");
+        assert_eq!(installed.len(), EVENTS.len(), "every event installed");
 
         let v = load_settings(&path).unwrap();
         // The user's own settings survive untouched.
@@ -291,7 +293,7 @@ mod tests {
         assert!(status_of(&path).unwrap().iter().all(|(_, p)| *p));
 
         let removed = remove_from(&path).unwrap();
-        assert_eq!(removed.len(), 3);
+        assert_eq!(removed.len(), EVENTS.len());
         assert!(status_of(&path).unwrap().iter().all(|(_, p)| !p));
 
         // Remove preserved the user's own SessionStart hook (not a loopd one).
@@ -309,7 +311,7 @@ mod tests {
         let path = temp_settings(""); // no file written
         assert!(!path.exists());
         let installed = install_into(&path, CMD).unwrap();
-        assert_eq!(installed.len(), 3);
+        assert_eq!(installed.len(), EVENTS.len());
         assert!(path.exists());
         let v = load_settings(&path).unwrap();
         assert!(v["hooks"]["PostToolUse"].as_array().unwrap().iter().any(entry_is_loopd));

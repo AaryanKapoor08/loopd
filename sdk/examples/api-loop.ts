@@ -102,6 +102,10 @@ async function main(): Promise<void> {
       return;
     }
     throw err;
+  } finally {
+    // Close the run in the cockpit. A governance kill already ended it (this is
+    // then a harmless no-op); a natural exit needs it to show `done`, not `running`.
+    await run.end();
   }
 }
 
