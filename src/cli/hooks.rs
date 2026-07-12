@@ -48,7 +48,9 @@ pub fn hooks(action: HooksAction) -> Result<()> {
                     installed.join(", "),
                     path.display()
                 );
-                println!("  start `claude` in any terminal — it now shows up in `loop dash` (observed).");
+                println!(
+                    "  start `claude` in any terminal — it now shows up in `loop dash` (observed)."
+                );
             }
         }
         HooksAction::Remove => {
@@ -56,7 +58,11 @@ pub fn hooks(action: HooksAction) -> Result<()> {
             if removed.is_empty() {
                 println!("no loopd hooks found in {}", path.display());
             } else {
-                println!("removed loopd hooks for [{}] from {}", removed.join(", "), path.display());
+                println!(
+                    "removed loopd hooks for [{}] from {}",
+                    removed.join(", "),
+                    path.display()
+                );
             }
         }
         HooksAction::Status => {
@@ -198,8 +204,8 @@ fn load_settings(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
@@ -219,8 +225,7 @@ fn write_settings(path: &Path, value: &Value) -> Result<()> {
     let body = serde_json::to_string_pretty(value).context("serializing settings.json")? + "\n";
     let tmp = sibling(path, ".loopd.tmp");
     std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("replacing {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
@@ -236,10 +241,8 @@ mod tests {
     use super::*;
 
     fn temp_settings(body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "loopd_hooks_{}",
-            crate::core::events::new_run_id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("loopd_hooks_{}", crate::core::events::new_run_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         if !body.is_empty() {
@@ -274,7 +277,9 @@ mod tests {
         // The pre-existing SessionStart hook is preserved alongside ours.
         let ss = v["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(ss.len(), 2, "existing + loopd entry");
-        assert!(ss.iter().any(|e| e["hooks"][0]["command"] == "node heal.mjs"));
+        assert!(ss
+            .iter()
+            .any(|e| e["hooks"][0]["command"] == "node heal.mjs"));
         assert!(ss.iter().any(entry_is_loopd));
 
         // Re-install is a no-op (no duplicate entry).
@@ -314,7 +319,11 @@ mod tests {
         assert_eq!(installed.len(), EVENTS.len());
         assert!(path.exists());
         let v = load_settings(&path).unwrap();
-        assert!(v["hooks"]["PostToolUse"].as_array().unwrap().iter().any(entry_is_loopd));
+        assert!(v["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(entry_is_loopd));
     }
 
     #[test]

@@ -209,7 +209,12 @@ fn governance_tick(state: &AppState, gov: &mut Governor) {
         let status_changed = desired_status != run.status;
         let acts = matches!(decision.action, Action::Pause | Action::Kill);
         if flags_changed || status_changed || acts {
-            to_act.push((run.run_id.clone(), decision.flags, desired_status, decision.action));
+            to_act.push((
+                run.run_id.clone(),
+                decision.flags,
+                desired_status,
+                decision.action,
+            ));
         }
     }
 
@@ -331,7 +336,8 @@ async fn get_run(
     Path(id): Path<String>,
 ) -> Result<Json<Run>, ApiError> {
     let run = state.store()?.get_run(&id).map_err(ApiError::Internal)?;
-    run.map(Json).ok_or_else(|| ApiError::NotFound(format!("run {id}")))
+    run.map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("run {id}")))
 }
 
 /// How many recent events to return for `/runs/:id/events`.
@@ -417,7 +423,10 @@ async fn create_run(
     run.max_duration_min = req.max_duration_min;
     run.on_trip = req.on_trip;
     run.status = RunStatus::Running;
-    state.store()?.upsert_run(&run).map_err(ApiError::Internal)?;
+    state
+        .store()?
+        .upsert_run(&run)
+        .map_err(ApiError::Internal)?;
 
     let opts = RunOpts { model: req.model };
     state
@@ -466,7 +475,12 @@ async fn pause_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if state.store()?.get_run(&id).map_err(ApiError::Internal)?.is_none() {
+    if state
+        .store()?
+        .get_run(&id)
+        .map_err(ApiError::Internal)?
+        .is_none()
+    {
         return Err(ApiError::NotFound(format!("run {id}")));
     }
     if !state.supervisor.owns(&id) {
@@ -506,7 +520,10 @@ async fn resume_run(
     resumed.status = RunStatus::Running;
     resumed.ended_at = None;
     resumed.updated_at = now_ms();
-    state.store()?.upsert_run(&resumed).map_err(ApiError::Internal)?;
+    state
+        .store()?
+        .upsert_run(&resumed)
+        .map_err(ApiError::Internal)?;
 
     let opts = RunOpts {
         model: run.model.clone(),
@@ -535,7 +552,10 @@ async fn ingest(
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<IngestResponse> {
-    Json(crate::observer::webhook::ingest_hook(&state.store, &payload))
+    Json(crate::observer::webhook::ingest_hook(
+        &state.store,
+        &payload,
+    ))
 }
 
 /// Surface-2 register (`POST /sdk/track`): create a `source = Sdk` run loopd does
@@ -623,7 +643,12 @@ mod tests {
     #[tokio::test]
     async fn health_returns_ok() {
         let resp = app(test_state())
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -676,7 +701,12 @@ mod tests {
 
         // GET an unknown run → 404.
         let resp = app(state.clone())
-            .oneshot(Request::builder().uri("/runs/nope").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -759,7 +789,13 @@ mod tests {
         let run_id = v["runId"].as_str().unwrap().to_string();
 
         // The run shows up unowned in /runs (it appears in `loop dash`).
-        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        let run = state
+            .store
+            .lock()
+            .unwrap()
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
         assert!(!run.owned);
         assert_eq!(run.run_reason, RunReason::Sdk);
 
@@ -797,7 +833,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["verdict"], "kill");
 
-        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        let run = state
+            .store
+            .lock()
+            .unwrap()
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(run.status, RunStatus::Killed);
     }
 
@@ -862,7 +904,13 @@ mod tests {
         let mut gov = Governor::new();
         governance_tick(&state, &mut gov);
 
-        let run = state.store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
+        let run = state
+            .store
+            .lock()
+            .unwrap()
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
         assert!(
             run.flags.contains(&"repeated-action".to_string()),
             "expected repeated-action flag, got {:?}",
@@ -961,7 +1009,13 @@ mod tests {
     fn await_not_running(state: &AppState, run_id: &str, within: std::time::Duration) -> Run {
         let deadline = std::time::Instant::now() + within;
         loop {
-            let run = state.store.lock().unwrap().get_run(run_id).unwrap().unwrap();
+            let run = state
+                .store
+                .lock()
+                .unwrap()
+                .get_run(run_id)
+                .unwrap()
+                .unwrap();
             if run.status != RunStatus::Running || std::time::Instant::now() >= deadline {
                 return run;
             }

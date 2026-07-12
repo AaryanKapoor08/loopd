@@ -46,7 +46,10 @@ fn projects_dir() -> Option<PathBuf> {
 /// blocking file I/O, polls a stop flag for clean shutdown). Returns `None` if
 /// the projects dir is absent — Mode B then runs on hooks alone (degraded: no
 /// token rollup), which the daemon logs.
-pub fn spawn(store: Arc<Mutex<Store>>, stop: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
+pub fn spawn(
+    store: Arc<Mutex<Store>>,
+    stop: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
     let projects = projects_dir()?;
     if !projects.is_dir() {
         tracing::info!(
@@ -185,10 +188,15 @@ impl TranscriptTailer {
             return; // no complete line yet
         };
         let consume = last_nl + 1;
-        self.offsets.insert(path.to_path_buf(), start + consume as u64);
+        self.offsets
+            .insert(path.to_path_buf(), start + consume as u64);
 
         // The session id is the filename stem (`<session_id>.jsonl`, verified §8 Q7).
-        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+        let Some(session_id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
             return;
         };
         let text = String::from_utf8_lossy(&bytes[..consume]);
@@ -246,7 +254,13 @@ impl TranscriptTailer {
         let state = session.parser.run_state();
         let run_id = session.run_id.clone();
 
-        persist_transcript(&self.store, &run_id, &events, &state, env.git_branch.as_deref());
+        persist_transcript(
+            &self.store,
+            &run_id,
+            &events,
+            &state,
+            env.git_branch.as_deref(),
+        );
     }
 }
 
@@ -347,7 +361,11 @@ mod tests {
     const U1: &str = r#"{"parentUuid":"u1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"data"}]},"uuid":"u2","sessionId":"sess_t","cwd":"C:\\dev\\loop","gitBranch":"main"}"#;
 
     /// Write `lines` into a `<projects>/<proj>/<sid>.jsonl` and return (tailer, path).
-    fn write_transcript(store: &Arc<Mutex<Store>>, sid: &str, lines: &[&str]) -> (TranscriptTailer, PathBuf) {
+    fn write_transcript(
+        store: &Arc<Mutex<Store>>,
+        sid: &str,
+        lines: &[&str],
+    ) -> (TranscriptTailer, PathBuf) {
         let projects = std::env::temp_dir().join(format!("loopd_proj_{}", new_run_id()));
         let proj = projects.join("C--dev-loop");
         std::fs::create_dir_all(&proj).unwrap();
@@ -363,7 +381,12 @@ mod tests {
         let (mut tailer, path) = write_transcript(&store, "sess_t", &[A1, U1]);
         tailer.process_file(&path);
 
-        let run = store.lock().unwrap().get_run_by_session_id("sess_t").unwrap().unwrap();
+        let run = store
+            .lock()
+            .unwrap()
+            .get_run_by_session_id("sess_t")
+            .unwrap()
+            .unwrap();
         assert!(!run.owned, "transcript-observed runs are read-only");
         assert_eq!(run.run_reason, RunReason::Observed);
         assert_eq!(run.status, RunStatus::Running);
@@ -373,10 +396,17 @@ mod tests {
         // total_input = 1000 fresh + 500 cache-read = 1500.
         assert_eq!(run.tokens_in, 1500);
         assert_eq!(run.tokens_out, 40);
-        assert!(run.cost_usd > 0.0, "cost computed from usage (no result line)");
+        assert!(
+            run.cost_usd > 0.0,
+            "cost computed from usage (no result line)"
+        );
 
         // Events carry the Transcript provenance, and the tool pair landed.
-        let events = store.lock().unwrap().events_for_run(&run.run_id, 50).unwrap();
+        let events = store
+            .lock()
+            .unwrap()
+            .events_for_run(&run.run_id, 50)
+            .unwrap();
         assert!(events.iter().all(|e| e.source == Source::Transcript));
         assert!(events.iter().any(|e| e.kind == EventKind::ToolUse));
         assert!(events.iter().any(|e| e.kind == EventKind::ToolResult));
@@ -387,18 +417,35 @@ mod tests {
         let store = test_store();
         let (mut tailer, path) = write_transcript(&store, "sess_t", &[A1, U1]);
         tailer.process_file(&path);
-        let before = store.lock().unwrap().get_run_by_session_id("sess_t").unwrap().unwrap();
+        let before = store
+            .lock()
+            .unwrap()
+            .get_run_by_session_id("sess_t")
+            .unwrap()
+            .unwrap();
 
         // Force a re-read of the whole file (offset reset), as a notify storm could.
         tailer.offsets.insert(path.clone(), 0);
         tailer.process_file(&path);
-        let after = store.lock().unwrap().get_run_by_session_id("sess_t").unwrap().unwrap();
+        let after = store
+            .lock()
+            .unwrap()
+            .get_run_by_session_id("sess_t")
+            .unwrap()
+            .unwrap();
 
         // Dedup by (session_id, uuid) holds: tokens/iterations unchanged.
         assert_eq!(after.tokens_in, before.tokens_in);
         assert_eq!(after.iteration, before.iteration);
-        let events = store.lock().unwrap().events_for_run(&after.run_id, 100).unwrap();
-        let tool_uses = events.iter().filter(|e| e.kind == EventKind::ToolUse).count();
+        let events = store
+            .lock()
+            .unwrap()
+            .events_for_run(&after.run_id, 100)
+            .unwrap();
+        let tool_uses = events
+            .iter()
+            .filter(|e| e.kind == EventKind::ToolUse)
+            .count();
         assert_eq!(tool_uses, 1, "the tool must not be re-emitted on re-read");
     }
 
@@ -410,7 +457,12 @@ mod tests {
         tailer.seed_offsets();
         tailer.scan();
         assert!(
-            store.lock().unwrap().get_run_by_session_id("sess_old").unwrap().is_none(),
+            store
+                .lock()
+                .unwrap()
+                .get_run_by_session_id("sess_old")
+                .unwrap()
+                .is_none(),
             "historical transcript content must not be imported"
         );
     }

@@ -5,7 +5,9 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap,
+};
 use ratatui::Frame;
 
 use crate::cli::fmt::{fmt_ctx_pct, fmt_elapsed, fmt_event, human, status_str, truncate};
@@ -143,45 +145,68 @@ fn draw_detail_info(frame: &mut Frame, area: Rect, run: &Run, defaults: &Default
     let max_iter = run.max_iterations.unwrap_or(caps.max_iterations);
     let max_cost = run.max_cost_usd.unwrap_or(caps.max_cost_usd);
     let max_dur = run.max_duration_min.unwrap_or(caps.max_duration_min);
-    let on_trip = run
-        .on_trip
-        .unwrap_or(default_on_trip)
-        .word();
+    let on_trip = run.on_trip.unwrap_or(default_on_trip).word();
 
     let mut lines = vec![
         Line::from(vec![
             Span::raw("label:  "),
             Span::styled(run.label.clone(), Style::new().bold()),
-            Span::raw(if run.owned { "   (owned)" } else { "   (observed)" }),
+            Span::raw(if run.owned {
+                "   (owned)"
+            } else {
+                "   (observed)"
+            }),
         ]),
         Line::from(vec![
             Span::raw("agent:  "),
             Span::raw(run.agent.clone()),
             Span::raw("   status: "),
-            Span::styled(status_str(run.status), Style::new().fg(status_color(run.status))),
+            Span::styled(
+                status_str(run.status),
+                Style::new().fg(status_color(run.status)),
+            ),
             Span::raw(format!("   model: {}", run.model.as_deref().unwrap_or("-"))),
         ]),
         Line::from(format!("prompt: {}", run.prompt)),
         Line::from(vec![
             Span::raw("caps:   "),
-            cap_span(format!("iter {}/{}", run.iteration, max_iter), run.iteration as f64, max_iter as f64),
+            cap_span(
+                format!("iter {}/{}", run.iteration, max_iter),
+                run.iteration as f64,
+                max_iter as f64,
+            ),
             Span::raw("   "),
-            cap_span(format!("cost ${:.4}/${:.2}", run.cost_usd, max_cost), run.cost_usd, max_cost),
+            cap_span(
+                format!("cost ${:.4}/${:.2}", run.cost_usd, max_cost),
+                run.cost_usd,
+                max_cost,
+            ),
             Span::raw("   "),
-            cap_span(format!("dur {elapsed_min}m/{max_dur}m"), elapsed_min as f64, max_dur as f64),
-            Span::raw(format!("   ctx {}", fmt_ctx_pct(run.context_tokens, run.context_window))),
+            cap_span(
+                format!("dur {elapsed_min}m/{max_dur}m"),
+                elapsed_min as f64,
+                max_dur as f64,
+            ),
+            Span::raw(format!(
+                "   ctx {}",
+                fmt_ctx_pct(run.context_tokens, run.context_window)
+            )),
         ]),
         Line::from(Span::styled(
-            format!("(on-trip: {on_trip} — governance enforces these caps + runaway/context detectors)"),
+            format!(
+                "(on-trip: {on_trip} — governance enforces these caps + runaway/context detectors)"
+            ),
             Style::new().fg(Color::DarkGray),
         )),
     ];
     lines.push(Line::from(""));
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title(format!("run {}", run.run_id))),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("run {}", run.run_id)),
+        ),
         area,
     );
 }

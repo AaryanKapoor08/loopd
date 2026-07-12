@@ -297,7 +297,10 @@ impl CodexParser {
                 // result that omits its id still reports status (step 4).
                 let pending = self.take_pending(item.id.as_deref());
                 let mut ev = self.event(EventKind::ToolResult);
-                ev.tool = pending.as_ref().map(|p| p.name.clone()).or(Some("shell".into()));
+                ev.tool = pending
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .or(Some("shell".into()));
                 ev.tool_input_hash = pending.and_then(|p| p.input_hash);
                 // exit_code 0 (or absent) is success; any non-zero is an error.
                 ev.tool_status = Some(match item.exit_code {
@@ -537,19 +540,25 @@ mod tests {
         let st = p.run_state();
         assert_eq!(st.model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(st.iteration, 1); // one turn.started
-        // total_input = input_tokens (cached is a subset, not additive) = 75389.
+                                     // total_input = input_tokens (cached is a subset, not additive) = 75389.
         assert_eq!(st.tokens_in, 75_389);
         // output + reasoning = 109 + 57 = 166 (reasoning billed as output).
         assert_eq!(st.tokens_out, 166);
         // The gate: Codex cost is COMPUTED from tokens, never blank.
-        assert!(st.cost_usd.map(|c| c > 0.0).unwrap_or(false), "cost must compute");
+        assert!(
+            st.cost_usd.map(|c| c > 0.0).unwrap_or(false),
+            "cost must compute"
+        );
     }
 
     #[test]
     fn failed_command_yields_tool_status_error() {
         let mut p = CodexParser::new("run_cx_2");
         let failed = r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"false","aggregated_output":"","exit_code":1,"status":"completed"}}"#;
-        let events = parse_all(&mut p, &[THREAD_STARTED, TURN_STARTED, ITEM_STARTED_CMD, failed]);
+        let events = parse_all(
+            &mut p,
+            &[THREAD_STARTED, TURN_STARTED, ITEM_STARTED_CMD, failed],
+        );
         let tr = events
             .iter()
             .find(|e| e.kind == EventKind::ToolResult)
@@ -566,7 +575,12 @@ mod tests {
         let completed_no_id = r#"{"type":"item.completed","item":{"type":"command_execution","command":"false","aggregated_output":"boom","exit_code":2,"status":"completed"}}"#;
         let events = parse_all(
             &mut p,
-            &[THREAD_STARTED, TURN_STARTED, ITEM_STARTED_CMD, completed_no_id],
+            &[
+                THREAD_STARTED,
+                TURN_STARTED,
+                ITEM_STARTED_CMD,
+                completed_no_id,
+            ],
         );
         let tr = events
             .iter()

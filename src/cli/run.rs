@@ -107,7 +107,10 @@ pub fn run(args: RunArgs) -> Result<()> {
     })?;
 
     println!("started run {} ({})", run.run_id, run.agent);
-    println!("  watch it:  loop dash      tail logs:  loop logs {} --follow", run.run_id);
+    println!(
+        "  watch it:  loop dash      tail logs:  loop logs {} --follow",
+        run.run_id
+    );
 
     // Per-run caps are now enforced by the governance engine (Phase 6). Echo the
     // active overrides so the user can see what loopd will hold this run to.

@@ -122,6 +122,9 @@ fn observed_label(cwd: Option<&str>, session_id: &str) -> String {
         .filter(|s| !s.is_empty());
     match base {
         Some(name) => format!("{name} (observed)"),
-        None => format!("observed-{}", session_id.chars().take(8).collect::<String>()),
+        None => format!(
+            "observed-{}",
+            session_id.chars().take(8).collect::<String>()
+        ),
     }
 }

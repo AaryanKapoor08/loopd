@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn matches_claude_families_by_substring() {
-        assert_eq!(price_of("claude-opus-4-8"), Some(ModelPrice::new(5.00, 25.00)));
+        assert_eq!(
+            price_of("claude-opus-4-8"),
+            Some(ModelPrice::new(5.00, 25.00))
+        );
         // Provider-prefixed and dated ids still resolve.
         assert_eq!(
             price_of("anthropic.claude-opus-4-8"),
@@ -165,8 +168,14 @@ mod tests {
             price_of("claude-haiku-4-5-20251001"),
             Some(ModelPrice::new(1.00, 5.00))
         );
-        assert_eq!(price_of("claude-sonnet-4-6"), Some(ModelPrice::new(3.00, 15.00)));
-        assert_eq!(price_of("claude-fable-5"), Some(ModelPrice::new(10.00, 50.00)));
+        assert_eq!(
+            price_of("claude-sonnet-4-6"),
+            Some(ModelPrice::new(3.00, 15.00))
+        );
+        assert_eq!(
+            price_of("claude-fable-5"),
+            Some(ModelPrice::new(10.00, 50.00))
+        );
     }
 
     #[test]
@@ -228,7 +237,10 @@ mod tests {
 
         // The bug this guards against: pricing only `input_tokens` undercounts.
         let naive = cost_of("claude-opus-4-8", usage.input_tokens, usage.output_tokens).unwrap();
-        assert!(naive < cost, "cache tokens must raise the bill: naive {naive} vs {cost}");
+        assert!(
+            naive < cost,
+            "cache tokens must raise the bill: naive {naive} vs {cost}"
+        );
 
         // Unknown models stay unpriced through the usage path too.
         assert_eq!(cost_of_usage("totally-made-up", &usage), None);

@@ -114,11 +114,7 @@ impl Governor {
             context_pct: CONTEXT_PCT,
         };
 
-        let mut flags: Vec<String> = self
-            .policies
-            .iter()
-            .filter_map(|p| p.check(&ctx))
-            .collect();
+        let mut flags: Vec<String> = self.policies.iter().filter_map(|p| p.check(&ctx)).collect();
         if let Some(f) = self.no_progress(run, config) {
             flags.push(f);
         }
@@ -150,8 +146,14 @@ impl Governor {
             other => other,
         };
 
-        let log = Self::due(&mut self.last_warn, &run.run_id, WARN_EVERY)
-            .then(|| format!("run {} flagged [{}] → {:?}", run.run_id, flags.join(","), action));
+        let log = Self::due(&mut self.last_warn, &run.run_id, WARN_EVERY).then(|| {
+            format!(
+                "run {} flagged [{}] → {:?}",
+                run.run_id,
+                flags.join(","),
+                action
+            )
+        });
 
         Decision { flags, action, log }
     }
@@ -384,7 +386,11 @@ mod tests {
         run.on_trip = Some(OnTrip::Kill);
         let d = gov.evaluate(&run, &[], &Config::default());
         assert!(d.flags.contains(&"cap-cost".to_string()));
-        assert_eq!(d.action, Action::Kill, "an SDK kill must not degrade to notify");
+        assert_eq!(
+            d.action,
+            Action::Kill,
+            "an SDK kill must not degrade to notify"
+        );
     }
 
     #[test]
@@ -399,7 +405,10 @@ mod tests {
         let mut paused = looping_run();
         fold_remote_action(&mut paused, Action::Pause);
         assert_eq!(paused.status, RunStatus::Paused);
-        assert!(paused.ended_at.is_none(), "a paused run is resumable, not ended");
+        assert!(
+            paused.ended_at.is_none(),
+            "a paused run is resumable, not ended"
+        );
 
         // A clearing tick recovers a Stuck run.
         let mut stuck = looping_run();

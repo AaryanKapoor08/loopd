@@ -328,7 +328,12 @@ mod tests {
 
         // This test process is certainly alive → Running.
         write_pidfile(&path, std::process::id()).unwrap();
-        assert_eq!(status_at(&path), Status::Running { pid: std::process::id() });
+        assert_eq!(
+            status_at(&path),
+            Status::Running {
+                pid: std::process::id()
+            }
+        );
 
         // A dead pid → Stale (pidfile present, process gone).
         write_pidfile(&path, 4_294_967_290).unwrap();

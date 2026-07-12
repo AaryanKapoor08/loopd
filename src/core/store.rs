@@ -137,7 +137,10 @@ impl Store {
             .any(|name| name == column);
         if !present {
             self.conn
-                .execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])
+                .execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+                    [],
+                )
                 .with_context(|| format!("adding column {table}.{column}"))?;
         }
         Ok(())
@@ -269,9 +272,7 @@ impl Store {
             .conn
             .prepare("SELECT * FROM runs ORDER BY started_at DESC")
             .context("preparing list_runs")?;
-        let rows = stmt
-            .query_map([], row_to_run)
-            .context("querying runs")?;
+        let rows = stmt.query_map([], row_to_run).context("querying runs")?;
         let mut runs = Vec::new();
         for row in rows {
             runs.push(row.context("reading run row")?);
@@ -347,9 +348,13 @@ fn row_to_run(row: &Row) -> rusqlite::Result<Run> {
         exit_code: row.get("exit_code")?,
         run_reason: text_to_enum(&row.get::<_, String>("run_reason")?)?,
         parent_run_id: row.get("parent_run_id")?,
-        max_iterations: row.get::<_, Option<i64>>("max_iterations")?.map(|v| v as u32),
+        max_iterations: row
+            .get::<_, Option<i64>>("max_iterations")?
+            .map(|v| v as u32),
         max_cost_usd: row.get("max_cost_usd")?,
-        max_duration_min: row.get::<_, Option<i64>>("max_duration_min")?.map(|v| v as u32),
+        max_duration_min: row
+            .get::<_, Option<i64>>("max_duration_min")?
+            .map(|v| v as u32),
         on_trip: match row.get::<_, Option<String>>("on_trip")? {
             Some(s) => Some(text_to_enum(&s)?),
             None => None,
@@ -377,7 +382,9 @@ fn row_to_event(row: &Row) -> rusqlite::Result<LoopEvent> {
         source: text_to_enum(&row.get::<_, String>("source")?)?,
         kind: text_to_enum(&row.get::<_, String>("kind")?)?,
         tool: row.get("tool")?,
-        tool_input_hash: row.get::<_, Option<i64>>("tool_input_hash")?.map(|v| v as u64),
+        tool_input_hash: row
+            .get::<_, Option<i64>>("tool_input_hash")?
+            .map(|v| v as u64),
         tool_status,
         iteration: row.get::<_, Option<i64>>("iteration")?.map(|v| v as u32),
         tokens_in: row.get::<_, Option<i64>>("tokens_in")?.map(|v| v as u32),
@@ -422,7 +429,10 @@ mod tests {
             store.insert_event(&ev).expect("insert event");
         }
 
-        let got = store.get_run(&run_id).expect("get run").expect("run exists");
+        let got = store
+            .get_run(&run_id)
+            .expect("get run")
+            .expect("run exists");
         assert_eq!(got.agent, "claude");
         assert_eq!(got.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(got.status, RunStatus::Running);

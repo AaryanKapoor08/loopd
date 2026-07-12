@@ -68,4 +68,3 @@ pub fn logs(args: LogsArgs) -> Result<()> {
     }
     Ok(())
 }
-

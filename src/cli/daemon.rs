@@ -57,7 +57,9 @@ pub fn status() -> Result<()> {
         }
         Status::Stopped => println!("daemon not running"),
         Status::Stale { pid } => {
-            println!("daemon not running (stale pidfile for pid {pid}; `loop daemon stop` clears it)");
+            println!(
+                "daemon not running (stale pidfile for pid {pid}; `loop daemon stop` clears it)"
+            );
         }
     }
     Ok(())

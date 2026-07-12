@@ -168,7 +168,10 @@ impl SupervisorRegistry {
         // Drop the slave so the PTY signals EOF once the child exits.
         drop(pair.slave);
 
-        let reader = pair.master.try_clone_reader().context("cloning pty reader")?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("cloning pty reader")?;
         let parser = adapter.new_parser(run_id);
 
         let handle = Arc::new(RunHandle {
@@ -219,14 +222,7 @@ impl SupervisorRegistry {
         std::thread::Builder::new()
             .name(format!("supervisor:{run_id}"))
             .spawn(move || {
-                reader_loop(
-                    run_id_owned,
-                    reader,
-                    parser,
-                    store,
-                    thread_handle,
-                    exit_rx,
-                );
+                reader_loop(run_id_owned, reader, parser, store, thread_handle, exit_rx);
             })
             .context("spawning supervisor reader thread")?;
 
@@ -452,7 +448,9 @@ fn kill_tree(pid: u32) {
     std::thread::sleep(Duration::from_millis(300));
     let _ = Command::new("kill").args(["-KILL", &group]).status();
     // Fallback for the bare pid in case it isn't a group leader.
-    let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
 }
 
 #[cfg(test)]
@@ -510,8 +508,8 @@ mod tests {
         reg.spawn_raw(&EchoAdapter, &run_id, &args, "", store.clone())
             .expect("spawn echo");
 
-        let run = wait_terminal(&store, &run_id, Duration::from_secs(15))
-            .expect("run should exist");
+        let run =
+            wait_terminal(&store, &run_id, Duration::from_secs(15)).expect("run should exist");
         assert_eq!(run.status, RunStatus::Done, "echo run must finish cleanly");
 
         let events = store.lock().unwrap().events_for_run(&run_id, 100).unwrap();
@@ -542,9 +540,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         assert!(reg.kill(&run_id), "kill should find the owned run");
 
-        let run = wait_terminal(&store, &run_id, Duration::from_secs(15))
-            .expect("run should exist");
-        assert_eq!(run.status, RunStatus::Killed, "killed run must be marked Killed");
+        let run =
+            wait_terminal(&store, &run_id, Duration::from_secs(15)).expect("run should exist");
+        assert_eq!(
+            run.status,
+            RunStatus::Killed,
+            "killed run must be marked Killed"
+        );
     }
 
     // Minimal adapters whose `program` is the test command; they reuse the

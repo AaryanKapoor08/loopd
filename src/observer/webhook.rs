@@ -209,7 +209,11 @@ mod tests {
         assert_eq!(second.run_id.as_deref(), Some(first.as_str()));
         assert_eq!(store.lock().unwrap().list_runs().unwrap().len(), 1);
         let events = store.lock().unwrap().events_for_run(&first, 10).unwrap();
-        assert_eq!(events.len(), 1, "only the first-sight RunStart; no tool dup");
+        assert_eq!(
+            events.len(),
+            1,
+            "only the first-sight RunStart; no tool dup"
+        );
     }
 
     #[test]
@@ -270,7 +274,11 @@ mod tests {
         let resp = ingest_hook(&store, &post_tool_use());
         assert_eq!(resp.run_id.as_deref(), Some(run_id.as_str()));
         let run = store.lock().unwrap().get_run(&run_id).unwrap().unwrap();
-        assert_eq!(run.status, RunStatus::Running, "activity must revive the run");
+        assert_eq!(
+            run.status,
+            RunStatus::Running,
+            "activity must revive the run"
+        );
         assert!(run.ended_at.is_none());
     }
 

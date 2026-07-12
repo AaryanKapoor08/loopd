@@ -134,8 +134,13 @@ mod tests {
     #[test]
     fn set_path_rejects_unknown_key() {
         let mut tree = full_tree();
-        let err = set_path(&mut tree, &["daemon", "bogus"], parse_scalar("1"), "daemon.bogus")
-            .expect_err("unknown key must error");
+        let err = set_path(
+            &mut tree,
+            &["daemon", "bogus"],
+            parse_scalar("1"),
+            "daemon.bogus",
+        )
+        .expect_err("unknown key must error");
         assert!(err.to_string().contains("unknown config key"));
     }
 

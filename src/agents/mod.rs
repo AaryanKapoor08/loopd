@@ -120,9 +120,11 @@ pub trait Adapter: Send + Sync {
     /// `loop run` calls this before asking the daemon to spawn, so a missing
     /// binary surfaces as a clear message instead of a buried spawn error.
     fn preflight(&self) -> std::result::Result<PathBuf, ExecutorError> {
-        self.availability().path.ok_or_else(|| ExecutorError::ExecutableNotFound {
-            program: self.program().to_string(),
-        })
+        self.availability()
+            .path
+            .ok_or_else(|| ExecutorError::ExecutableNotFound {
+                program: self.program().to_string(),
+            })
     }
 
     /// Mode-B (Phase 7): does this transcript file belong to this agent?
@@ -276,7 +278,10 @@ mod tests {
         // KNOWN_AGENTS (used for the "unknown agent" hint) must stay in lockstep
         // with what `adapter_for` can actually build.
         for id in KNOWN_AGENTS {
-            assert!(adapter_for(id).is_some(), "`{id}` must resolve to an adapter");
+            assert!(
+                adapter_for(id).is_some(),
+                "`{id}` must resolve to an adapter"
+            );
         }
     }
 
@@ -300,7 +305,9 @@ mod tests {
                 claude::ClaudeAdapter::new().new_parser(run_id)
             }
         }
-        let err = GhostAdapter.preflight().expect_err("missing binary must error");
+        let err = GhostAdapter
+            .preflight()
+            .expect_err("missing binary must error");
         assert!(matches!(err, ExecutorError::ExecutableNotFound { .. }));
         // The message names the program and is actionable (no stack trace).
         assert!(err.to_string().contains("not found on your PATH"));

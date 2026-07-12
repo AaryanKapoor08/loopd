@@ -50,7 +50,11 @@ pub fn is_git_repo(cwd: &str) -> bool {
 /// clean exit, or `None` on spawn failure / non-zero exit. The caller restricts
 /// `args` to read-only verbs; this helper does not execute anything else.
 fn run_git(cwd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(cwd).args(args).output().ok()?;
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

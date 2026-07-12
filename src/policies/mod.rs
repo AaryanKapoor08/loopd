@@ -191,7 +191,12 @@ mod tests {
     /// Default context-exhaustion fraction used by these tests + the detector.
     const CTX_PCT: f64 = 0.90;
 
-    fn ctx<'a>(run: &'a Run, recent: &'a [LoopEvent], caps: Caps, runaway: Runaway) -> DetectCtx<'a> {
+    fn ctx<'a>(
+        run: &'a Run,
+        recent: &'a [LoopEvent],
+        caps: Caps,
+        runaway: Runaway,
+    ) -> DetectCtx<'a> {
         DetectCtx {
             run,
             recent,

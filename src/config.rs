@@ -306,7 +306,8 @@ mod tests {
     #[test]
     fn partial_yaml_merges_onto_defaults() {
         // Only the port is set; everything else must fall back to defaults.
-        let dir = std::env::temp_dir().join(format!("loopd_cfg_{}", crate::core::events::new_run_id()));
+        let dir =
+            std::env::temp_dir().join(format!("loopd_cfg_{}", crate::core::events::new_run_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         std::fs::write(&path, "daemon:\n  port: 9000\n").unwrap();

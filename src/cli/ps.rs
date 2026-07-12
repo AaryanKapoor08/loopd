@@ -98,7 +98,11 @@ impl Row {
             },
             owned: if run.owned { "own" } else { "obs" }.into(),
             status_color: status_ansi(run.status),
-            flags_color: if run.flags.is_empty() { "" } else { ANSI_YELLOW },
+            flags_color: if run.flags.is_empty() {
+                ""
+            } else {
+                ANSI_YELLOW
+            },
         }
     }
 }
@@ -153,8 +157,16 @@ impl Widths {
 fn print_row(r: &Row, w: &Widths, color: bool) {
     // Pad first, then wrap in color — escape codes have zero display width but
     // would confuse `format!`'s width specifiers if embedded before padding.
-    let status = paint(format!("{:<w$}", r.status, w = w.status), r.status_color, color);
-    let flags = paint(format!("{:<w$}", r.flags, w = w.flags), r.flags_color, color);
+    let status = paint(
+        format!("{:<w$}", r.status, w = w.status),
+        r.status_color,
+        color,
+    );
+    let flags = paint(
+        format!("{:<w$}", r.flags, w = w.flags),
+        r.flags_color,
+        color,
+    );
     println!(
         "{:<id$}  {:<label$}  {:<agent$}  {status}  {:>iter$}  {:>elapsed$}  {:>tokens$}  {:>cost$}  {:>ctx$}  {flags}  {:<owned$}",
         r.id, r.label, r.agent, r.iter, r.elapsed, r.tokens, r.cost, r.ctx, r.owned,
@@ -172,4 +184,3 @@ fn paint(cell: String, code: &str, color: bool) -> String {
         cell
     }
 }
-

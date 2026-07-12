@@ -78,7 +78,11 @@ fn daemon_start_health_stop_round_trip() {
 
     // start → exits 0 only after /health is green, and writes the pidfile.
     let st = run(&dir, &["daemon", "start"]);
-    assert!(st.success(), "daemon start failed; log:\n{}", read_log(&dir));
+    assert!(
+        st.success(),
+        "daemon start failed; log:\n{}",
+        read_log(&dir)
+    );
     assert!(pidfile.exists(), "pidfile must exist after start");
     assert!(
         health_ok(TEST_PORT, Duration::from_secs(10)),

@@ -18,11 +18,6 @@
 //!   `parent_tool_use_id` is `None` (subagent exclusion);
 //! - `mcp__server__tool` is displayed as `mcp:server:tool`.
 
-
-
-
-
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -699,7 +694,10 @@ mod tests {
 
     #[test]
     fn mcp_tool_names_are_displayed_namespaced() {
-        assert_eq!(display_tool("mcp__github__create_issue"), "mcp:github:create_issue");
+        assert_eq!(
+            display_tool("mcp__github__create_issue"),
+            "mcp:github:create_issue"
+        );
         assert_eq!(display_tool("Bash"), "Bash");
     }
 
@@ -710,7 +708,10 @@ mod tests {
         let sub = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"sub work"}],"usage":{"input_tokens":999,"output_tokens":999}},"session_id":"sess_abc","parent_tool_use_id":"tu_parent"}"#;
         p.push(&format!("{sub}\n"));
         let st = p.run_state();
-        assert_eq!(st.tokens_in, 0, "subagent tokens must not fold into the run total");
+        assert_eq!(
+            st.tokens_in, 0,
+            "subagent tokens must not fold into the run total"
+        );
         assert_eq!(st.iteration, 0, "subagent turn must not bump iteration");
     }
 
@@ -732,9 +733,15 @@ mod tests {
         assert_eq!(p.session_id(), Some("sess_xyz"));
 
         // The tool_use → tool_result pair is recognized across the two lines.
-        let tu = events.iter().find(|e| e.kind == EventKind::ToolUse).unwrap();
+        let tu = events
+            .iter()
+            .find(|e| e.kind == EventKind::ToolUse)
+            .unwrap();
         assert_eq!(tu.tool.as_deref(), Some("Read"));
-        let tr = events.iter().find(|e| e.kind == EventKind::ToolResult).unwrap();
+        let tr = events
+            .iter()
+            .find(|e| e.kind == EventKind::ToolResult)
+            .unwrap();
         assert_eq!(tr.tool.as_deref(), Some("Read"));
 
         let st = p.run_state();
@@ -745,7 +752,7 @@ mod tests {
         // ctx% can read high for a 1M-window model observed read-only).
         assert_eq!(st.context_window, Some(DEFAULT_CONTEXT_WINDOW));
         assert_eq!(st.iteration, 1); // one main assistant turn
-        // total_input = 8260 + 7377 cache-create + 20806 cache-read = 36443.
+                                     // total_input = 8260 + 7377 cache-create + 20806 cache-read = 36443.
         assert_eq!(st.tokens_in, 36_443);
         assert_eq!(st.tokens_out, 250);
         // No `result` line → cost is computed from usage (transcript has no cost).

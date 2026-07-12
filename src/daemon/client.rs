@@ -87,9 +87,10 @@ impl DaemonClient {
             .timeout(Duration::from_millis(500))
             .send();
         match res {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json::<Health>().map(|h| h.status == "ok").unwrap_or(false)
-            }
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<Health>()
+                .map(|h| h.status == "ok")
+                .unwrap_or(false),
             _ => false,
         }
     }
