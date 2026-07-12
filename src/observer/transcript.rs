@@ -23,7 +23,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -100,12 +100,48 @@ fn run_tailer(store: Arc<Mutex<Store>>, projects: PathBuf, stop: Arc<AtomicBool>
     }
 }
 
+/// Evict a session's in-memory state after this long without a new line. Keeps
+/// the per-session maps (parser, seen uuids) from growing without bound over a
+/// long-lived daemon. Deliberately longer than the default 30-min observed-run
+/// idle close: by the time state is evicted, the run has already been marked
+/// `Done`. If the session appends again later, state is rebuilt on top of the
+/// [`Baseline`] snapshot, so accumulated totals are never lost.
+const SESSION_EVICT_AFTER: Duration = Duration::from_secs(60 * 60);
+
 /// Per-observed-session state: the run it maps to, its stateful parser (the
 /// canonical rollup lives here), and the set of line uuids already processed.
 struct SessionState {
     run_id: String,
     parser: Box<dyn StreamParser>,
     seen_uuids: HashSet<String>,
+    /// The run's totals at the moment this state was created. A parser only
+    /// counts lines it has seen, so after an eviction (or a daemon restart) its
+    /// fresh totals are *deltas* on top of these — added back in
+    /// [`persist_transcript`] so the run row never goes backwards.
+    baseline: Baseline,
+    /// When this session last produced a line (drives eviction).
+    last_seen: Instant,
+}
+
+/// The cumulative fields a re-created parser can't know about (they were
+/// counted by a previous parser instance). Snapshotted from the run row.
+#[derive(Clone, Copy, Default)]
+struct Baseline {
+    iteration: u32,
+    tokens_in: u32,
+    tokens_out: u32,
+    cost_usd: f64,
+}
+
+impl Baseline {
+    fn of(run: &crate::core::events::Run) -> Self {
+        Self {
+            iteration: run.iteration,
+            tokens_in: run.tokens_in,
+            tokens_out: run.tokens_out,
+            cost_usd: run.cost_usd,
+        }
+    }
 }
 
 /// The tailer's working state. Not shared across threads — it lives entirely on
@@ -147,11 +183,23 @@ impl TranscriptTailer {
         out
     }
 
-    /// One reconcile pass: process appended bytes in every transcript that grew.
+    /// One reconcile pass: process appended bytes in every transcript that grew,
+    /// then drop bookkeeping that can no longer matter (idle session state,
+    /// offsets of deleted files) so a long-lived daemon stays bounded.
     fn scan(&mut self) {
         for path in self.transcript_files() {
             self.process_file(&path);
         }
+        self.evict_stale();
+    }
+
+    /// Drop in-memory state for sessions that have produced nothing for
+    /// [`SESSION_EVICT_AFTER`], and offsets for transcripts deleted from disk.
+    /// Totals survive eviction via the [`Baseline`] snapshot.
+    fn evict_stale(&mut self) {
+        self.sessions
+            .retain(|_, s| s.last_seen.elapsed() < SESSION_EVICT_AFTER);
+        self.offsets.retain(|path, _| path.exists());
     }
 
     /// Read and parse complete lines appended to `path` since the last offset.
@@ -228,16 +276,29 @@ impl TranscriptTailer {
             };
             // The parser stamps every event with the run id (not the session id).
             let parser = adapter.new_parser(&run_id);
+            // Snapshot the run's current totals: after an eviction or a daemon
+            // restart the run row already carries earlier activity this fresh
+            // parser will never see, and persist must add — not clobber.
+            let baseline = self
+                .store
+                .lock()
+                .ok()
+                .and_then(|s| s.get_run(&run_id).ok().flatten())
+                .map(|r| Baseline::of(&r))
+                .unwrap_or_default();
             self.sessions.insert(
                 session_id.to_string(),
                 SessionState {
                     run_id,
                     parser,
                     seen_uuids: HashSet::new(),
+                    baseline,
+                    last_seen: Instant::now(),
                 },
             );
         }
         let session = self.sessions.get_mut(session_id).expect("just inserted");
+        session.last_seen = Instant::now();
 
         // Dedup: skip a line we've already processed (notify storm / re-read).
         if let Some(uuid) = &env.uuid {
@@ -254,11 +315,13 @@ impl TranscriptTailer {
         let state = session.parser.run_state();
         let run_id = session.run_id.clone();
 
+        let baseline = session.baseline;
         persist_transcript(
             &self.store,
             &run_id,
             &events,
             &state,
+            baseline,
             env.git_branch.as_deref(),
         );
     }
@@ -267,12 +330,17 @@ impl TranscriptTailer {
 /// Insert the transcript events and roll the canonical metrics onto the run.
 /// Re-reads under the store lock and only touches the fields the transcript owns
 /// (model / session id / iterations / tokens / cost / context / branch), so it
-/// never clobbers liveness the hook feed wrote.
+/// never clobbers liveness the hook feed wrote. Cumulative fields are
+/// `baseline + parser total`: the parser only counted lines *it* has seen, and
+/// `baseline` carries what earlier parser instances (before an eviction or a
+/// daemon restart) already rolled up.
+#[allow(clippy::too_many_arguments)] // the transcript-owned fields, spelled out
 fn persist_transcript(
     store: &Arc<Mutex<Store>>,
     run_id: &str,
     events: &[LoopEvent],
     state: &RunState,
+    baseline: Baseline,
     branch: Option<&str>,
 ) {
     let Ok(store) = store.lock() else {
@@ -288,12 +356,12 @@ fn persist_transcript(
         if let Some(sid) = &state.session_id {
             run.agent_session_id = Some(sid.clone());
         }
-        run.iteration = state.iteration;
-        run.tokens_in = state.tokens_in;
-        run.tokens_out = state.tokens_out;
+        run.iteration = baseline.iteration.saturating_add(state.iteration);
+        run.tokens_in = baseline.tokens_in.saturating_add(state.tokens_in);
+        run.tokens_out = baseline.tokens_out.saturating_add(state.tokens_out);
         run.context_tokens = state.context_tokens;
         if let Some(cost) = state.cost_usd {
-            run.cost_usd = cost;
+            run.cost_usd = baseline.cost_usd + cost;
         }
         if let Some(cw) = state.context_window {
             run.context_window = cw;
@@ -447,6 +515,85 @@ mod tests {
             .filter(|e| e.kind == EventKind::ToolUse)
             .count();
         assert_eq!(tool_uses, 1, "the tool must not be re-emitted on re-read");
+    }
+
+    // A later main-turn assistant line (fresh uuid) — tokens_in = 2000, out = 60.
+    const A2: &str = r#"{"parentUuid":"u2","isSidechain":false,"type":"assistant","message":{"model":"claude-opus-4-8","role":"assistant","content":[{"type":"text","text":"more work"}],"usage":{"input_tokens":2000,"output_tokens":60}},"uuid":"u3","sessionId":"sess_t","cwd":"C:\\dev\\loop","gitBranch":"main"}"#;
+
+    #[test]
+    fn idle_session_state_is_evicted_and_deleted_file_offsets_pruned() {
+        let store = test_store();
+        let (mut tailer, path) = write_transcript(&store, "sess_t", &[A1, U1]);
+        tailer.process_file(&path);
+        assert_eq!(tailer.sessions.len(), 1);
+
+        // Nothing is evicted while the session is fresh.
+        tailer.evict_stale();
+        assert_eq!(tailer.sessions.len(), 1, "fresh session must survive");
+
+        // Age the session past the eviction window, then sweep.
+        let old = Instant::now()
+            .checked_sub(SESSION_EVICT_AFTER + Duration::from_secs(1))
+            .expect("clock predates eviction window");
+        tailer.sessions.get_mut("sess_t").unwrap().last_seen = old;
+        tailer.evict_stale();
+        assert!(tailer.sessions.is_empty(), "idle session state must go");
+        // The file still exists, so its offset (and no-reimport guarantee) stays.
+        assert!(tailer.offsets.contains_key(&path));
+
+        // A deleted transcript loses its offset entry too.
+        std::fs::remove_file(&path).unwrap();
+        tailer.evict_stale();
+        assert!(
+            tailer.offsets.is_empty(),
+            "offsets of deleted files must go"
+        );
+    }
+
+    #[test]
+    fn totals_survive_eviction_via_the_baseline() {
+        let store = test_store();
+        let (mut tailer, path) = write_transcript(&store, "sess_t", &[A1, U1]);
+        tailer.process_file(&path);
+        let before = store
+            .lock()
+            .unwrap()
+            .get_run_by_session_id("sess_t")
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.tokens_in, 1500);
+        assert_eq!(before.iteration, 1);
+
+        // Evict the in-memory state (as the idle sweep or a daemon restart
+        // would), then append fresh activity to the same transcript.
+        tailer.sessions.clear();
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{A2}").unwrap();
+        drop(f);
+        tailer.process_file(&path);
+
+        let after = store
+            .lock()
+            .unwrap()
+            .get_run_by_session_id("sess_t")
+            .unwrap()
+            .unwrap();
+        // 1500 + 2000 fresh input; 40 + 60 out; turn 1 + 1 — never clobbered
+        // back down to just what the new parser saw.
+        assert_eq!(
+            after.tokens_in, 3500,
+            "totals must accumulate across eviction"
+        );
+        assert_eq!(after.tokens_out, 100);
+        assert_eq!(after.iteration, 2);
+        assert!(
+            after.cost_usd > before.cost_usd,
+            "cost keeps accumulating too"
+        );
     }
 
     #[test]
