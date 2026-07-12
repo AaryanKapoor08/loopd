@@ -168,6 +168,12 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
+            KeyCode::PageDown => self.jump_selection(10),
+            KeyCode::PageUp => self.jump_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.selected = self.visible_runs().len().saturating_sub(1);
+            }
             KeyCode::Enter => self.open_detail(client),
             KeyCode::Char('k') => self.stage_kill(),
             KeyCode::Char('p') => self.pause_or_resume(client),
@@ -339,6 +345,16 @@ impl App {
             return;
         }
         self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+    }
+
+    /// Move the selection by `delta` without wrapping (PageUp/PageDown) — a big
+    /// jump should pin to the ends, not land somewhere modular.
+    fn jump_selection(&mut self, delta: i32) {
+        let len = self.visible_runs().len() as i32;
+        if len == 0 {
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).clamp(0, len - 1) as usize;
     }
 
     /// Keep `selected` in bounds after the run list or filter changes.

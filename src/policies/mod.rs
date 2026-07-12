@@ -129,9 +129,7 @@ impl Policy for RepeatedAction {
             .filter(|e| e.kind == EventKind::ToolUse)
             .filter_map(|e| Some((e.tool.as_deref()?, e.tool_input_hash?)))
             .collect();
-        let Some(head) = calls.first() else {
-            return None;
-        };
+        let head = calls.first()?;
         let streak = calls.iter().take_while(|c| *c == head).count() as u32;
         (streak >= threshold).then(|| self.id().to_string())
     }

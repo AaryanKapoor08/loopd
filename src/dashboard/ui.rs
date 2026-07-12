@@ -102,11 +102,12 @@ fn run_row(r: &Run, now: i64) -> Row<'static> {
         Cell::from(format!("{}/{}", human(r.tokens_in), human(r.tokens_out))),
         Cell::from(format!("${:.4}", r.cost_usd)),
         Cell::from(fmt_ctx_pct(r.context_tokens, r.context_window)),
-        Cell::from(if r.flags.is_empty() {
-            "-".to_string()
+        if r.flags.is_empty() {
+            Cell::from("-")
         } else {
-            r.flags.join(",")
-        }),
+            // Raised flags are the "look here" signal — same yellow as `stuck`.
+            Cell::from(r.flags.join(",")).style(Style::new().fg(Color::Yellow))
+        },
         Cell::from(fmt_elapsed(now.saturating_sub(r.last_event_at))),
         Cell::from(if r.owned { "own" } else { "ro" }),
     ];

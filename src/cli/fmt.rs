@@ -63,6 +63,24 @@ pub fn status_str(s: RunStatus) -> &'static str {
     }
 }
 
+/// Reset ANSI styling.
+pub const ANSI_RESET: &str = "\x1b[0m";
+/// Yellow — used for raised flags in the `ps` table.
+pub const ANSI_YELLOW: &str = "\x1b[33m";
+
+/// The ANSI color code for a run status — the same at-a-glance health cue the
+/// TUI's `status_color` gives, for plain-terminal output (`loop ps`).
+pub fn status_ansi(s: RunStatus) -> &'static str {
+    match s {
+        RunStatus::Running => "\x1b[32m", // green
+        RunStatus::Done => "\x1b[90m",    // dim gray
+        RunStatus::Failed => "\x1b[31m",  // red
+        RunStatus::Killed => "\x1b[35m",  // magenta
+        RunStatus::Stuck => "\x1b[33m",   // yellow
+        RunStatus::Paused => "\x1b[36m",  // cyan
+    }
+}
+
 /// Truncate `s` to at most `max` characters, appending `…` when it had to cut.
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -116,7 +134,7 @@ pub fn fmt_time(ts_ms: i64) -> String {
 
 /// Flatten `text` to a single line and clip to `max` chars with an ellipsis.
 pub fn one_line(text: &str, max: usize) -> String {
-    let flat = text.replace('\n', " ").replace('\r', " ");
+    let flat = text.replace(['\n', '\r'], " ");
     let flat = flat.trim();
     if flat.chars().count() <= max {
         flat.to_string()

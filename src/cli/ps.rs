@@ -3,9 +3,13 @@
 //! Thin client: `GET /runs` and render. All metrics come from the daemon's
 //! rolled-up `Run` rows; the CLI only formats them.
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 
-use crate::cli::fmt::{fmt_ctx_pct, fmt_elapsed, human, status_str, truncate};
+use crate::cli::fmt::{
+    fmt_ctx_pct, fmt_elapsed, human, status_ansi, status_str, truncate, ANSI_RESET, ANSI_YELLOW,
+};
 use crate::config::Config;
 use crate::core::events::{now_ms, Run};
 use crate::daemon::client::DaemonClient;
@@ -21,6 +25,11 @@ pub fn ps() -> Result<()> {
         return Ok(());
     }
 
+    // Color the health-signal columns only on a real terminal, and honor the
+    // NO_COLOR convention (https://no-color.org). Widths are measured on the
+    // plain strings, so alignment never depends on escape codes.
+    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+
     // Columns: id · label · agent · status · iter · elapsed · tokens(in/out) ·
     // cost · ctx% · flags · owned?
     let header = Row {
@@ -35,6 +44,8 @@ pub fn ps() -> Result<()> {
         ctx: "CTX%".into(),
         flags: "FLAGS".into(),
         owned: "OWNED".into(),
+        status_color: "",
+        flags_color: "",
     };
     let rows: Vec<Row> = runs.iter().map(Row::from_run).collect();
 
@@ -42,14 +53,15 @@ pub fn ps() -> Result<()> {
     let all = std::iter::once(&header).chain(rows.iter());
     let w = Widths::measure(all);
 
-    print_row(&header, &w);
+    print_row(&header, &w, false);
     for r in &rows {
-        print_row(r, &w);
+        print_row(r, &w, color);
     }
     Ok(())
 }
 
-/// One pre-formatted table line.
+/// One pre-formatted table line, plus the ANSI codes its health cells paint
+/// with (empty = plain; the header row stays plain).
 struct Row {
     id: String,
     label: String,
@@ -62,6 +74,8 @@ struct Row {
     ctx: String,
     flags: String,
     owned: String,
+    status_color: &'static str,
+    flags_color: &'static str,
 }
 
 impl Row {
@@ -83,6 +97,8 @@ impl Row {
                 run.flags.join(",")
             },
             owned: if run.owned { "own" } else { "obs" }.into(),
+            status_color: status_ansi(run.status),
+            flags_color: if run.flags.is_empty() { "" } else { ANSI_YELLOW },
         }
     }
 }
@@ -134,12 +150,26 @@ impl Widths {
     }
 }
 
-fn print_row(r: &Row, w: &Widths) {
+fn print_row(r: &Row, w: &Widths, color: bool) {
+    // Pad first, then wrap in color — escape codes have zero display width but
+    // would confuse `format!`'s width specifiers if embedded before padding.
+    let status = paint(format!("{:<w$}", r.status, w = w.status), r.status_color, color);
+    let flags = paint(format!("{:<w$}", r.flags, w = w.flags), r.flags_color, color);
     println!(
-        "{:<id$}  {:<label$}  {:<agent$}  {:<status$}  {:>iter$}  {:>elapsed$}  {:>tokens$}  {:>cost$}  {:>ctx$}  {:<flags$}  {:<owned$}",
-        r.id, r.label, r.agent, r.status, r.iter, r.elapsed, r.tokens, r.cost, r.ctx, r.flags, r.owned,
-        id = w.id, label = w.label, agent = w.agent, status = w.status, iter = w.iter,
-        elapsed = w.elapsed, tokens = w.tokens, cost = w.cost, ctx = w.ctx, flags = w.flags, owned = w.owned,
+        "{:<id$}  {:<label$}  {:<agent$}  {status}  {:>iter$}  {:>elapsed$}  {:>tokens$}  {:>cost$}  {:>ctx$}  {flags}  {:<owned$}",
+        r.id, r.label, r.agent, r.iter, r.elapsed, r.tokens, r.cost, r.ctx, r.owned,
+        id = w.id, label = w.label, agent = w.agent, iter = w.iter,
+        elapsed = w.elapsed, tokens = w.tokens, cost = w.cost, ctx = w.ctx, owned = w.owned,
     );
+}
+
+/// Wrap an already-padded cell in an ANSI color, when colors are on and the
+/// cell has one.
+fn paint(cell: String, code: &str, color: bool) -> String {
+    if color && !code.is_empty() {
+        format!("{code}{cell}{ANSI_RESET}")
+    } else {
+        cell
+    }
 }
 
