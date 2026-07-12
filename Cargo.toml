@@ -73,6 +73,12 @@ notify = "6"
 # imports use `.js` extensions, required by the SDK's NodeNext resolution.
 ts-rs = { version = "10", features = ["import-esm"] }
 
+# --- time display ---------------------------------------------------------------
+# `loop logs` and the dashboard show event times as wall-clock HH:MM:SS in the
+# user's LOCAL timezone; chrono resolves the local UTC offset safely on every
+# platform (no default features — just the clock).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # --- diagnostics --------------------------------------------------------------
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

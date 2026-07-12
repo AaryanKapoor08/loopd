@@ -124,9 +124,15 @@ pub fn fmt_event(ev: &LoopEvent) -> String {
     line
 }
 
-/// Wall-clock `HH:MM:SS` from epoch ms, without pulling in a date crate
-/// (seconds-of-day).
+/// Wall-clock `HH:MM:SS` from epoch ms, in the user's **local** timezone (the
+/// naive seconds-of-day math this replaces rendered UTC, which read hours off
+/// for anyone not on Greenwich time). Falls back to UTC seconds-of-day if the
+/// timestamp is out of chrono's range.
 pub fn fmt_time(ts_ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    if let Some(dt) = Local.timestamp_millis_opt(ts_ms).earliest() {
+        return dt.format("%H:%M:%S").to_string();
+    }
     let secs = (ts_ms / 1000).rem_euclid(86_400);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     format!("{h:02}:{m:02}:{s:02}")
@@ -198,6 +204,26 @@ mod tests {
     fn ctx_pct_guards_zero_window() {
         assert_eq!(fmt_ctx_pct(0, 0), "-");
         assert_eq!(fmt_ctx_pct(50_000, 200_000), "25%");
+    }
+
+    #[test]
+    fn fmt_time_renders_local_wall_clock() {
+        // Shape check (the exact hour depends on the machine's timezone).
+        let s = fmt_time(crate::core::events::now_ms());
+        assert_eq!(s.len(), 8, "HH:MM:SS, got {s}");
+        assert_eq!(s.as_bytes()[2], b':');
+        assert_eq!(s.as_bytes()[5], b':');
+
+        // The rendered hour matches chrono's local rendering, not raw UTC math.
+        use chrono::{Local, TimeZone};
+        let ts = 1_783_877_630_969i64;
+        let expect = Local
+            .timestamp_millis_opt(ts)
+            .earliest()
+            .unwrap()
+            .format("%H:%M:%S")
+            .to_string();
+        assert_eq!(fmt_time(ts), expect);
     }
 
     #[test]
